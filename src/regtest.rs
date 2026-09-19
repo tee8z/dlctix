@@ -14,7 +14,7 @@ use musig2::{CompactSignature, LiftedSignature, PartialSignature, PubNonce};
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
-use bitcoincore_rpc::{jsonrpc::serde_json, Auth, Client as BitcoinClient, RpcApi};
+use bitcoincore_rpc::{jsonrpc::serde_json, Client as BitcoinClient, RpcApi};
 use once_cell::sync::Lazy;
 use tempfile::TempDir;
 
@@ -65,14 +65,43 @@ const DEFAULT_REGTEST_RPC_USERNAME: &str = "regtest";
 const DEFAULT_REGTEST_RPC_PASSWORD: &str = "regtest";
 const DEFAULT_REGTEST_RPC_URL: &str = "http://127.0.0.1:18443";
 
-/// This represents a handle to temporary resources which should be
-/// cleaned up when the test ends.
+/// How long to wait for a freshly spawned `bitcoind` to start answering RPCs.
+const BITCOIND_STARTUP_TIMEOUT: time::Duration = time::Duration::from_secs(60);
+
+/// Per-request RPC timeout. Mining a chunk of regtest blocks on a loaded machine
+/// or a small CI runner can take well over the library's 15 second default.
+const RPC_TIMEOUT: time::Duration = time::Duration::from_secs(120);
+
+/// Build a bitcoind RPC client with [`RPC_TIMEOUT`] as the request timeout.
+fn new_bitcoin_client(url: &str, user: String, pass: String) -> BitcoinClient {
+    let transport = bitcoincore_rpc::jsonrpc::minreq_http::Builder::new()
+        .timeout(RPC_TIMEOUT)
+        .url(url)
+        .expect("valid bitcoind RPC url")
+        .basic_auth(user, Some(pass))
+        .build();
+    BitcoinClient::from_jsonrpc(bitcoincore_rpc::jsonrpc::client::Client::with_transport(
+        transport,
+    ))
+}
+
+/// This represents a handle to temporary resources which should be cleaned up
+/// when the test ends. Dropping the handle kills the `bitcoind` child if it is
+/// still running, so a panic anywhere in a test never leaks a node, and then
+/// removes its temporary datadir.
 #[derive(Debug)]
 struct BitcoindSubprocessHandle {
     #[allow(dead_code)]
     tempdir: TempDir,
-    #[allow(dead_code)]
     child: process::Child,
+}
+
+impl Drop for BitcoindSubprocessHandle {
+    fn drop(&mut self) {
+        // `kill` fails if the child already exited after a clean `stop`; that is fine.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn run_bitcoind() -> Option<(BitcoindSubprocessHandle, BitcoinClient)> {
@@ -93,6 +122,7 @@ fn run_bitcoind() -> Option<(BitcoindSubprocessHandle, BitcoinClient)> {
         .arg(format!("-rpcpassword={}", DEFAULT_REGTEST_RPC_PASSWORD))
         .arg(format!("-datadir={}", dir.path().display()))
         .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null())
         .spawn()
         .ok()?;
 
@@ -101,13 +131,12 @@ fn run_bitcoind() -> Option<(BitcoindSubprocessHandle, BitcoinClient)> {
         child,
     };
 
-    let auth = Auth::UserPass(
+    let bitcoind_rpc_url = format!("http://127.0.0.1:{}", rpc_port);
+    let rpc_client = new_bitcoin_client(
+        &bitcoind_rpc_url,
         DEFAULT_REGTEST_RPC_USERNAME.to_string(),
         DEFAULT_REGTEST_RPC_PASSWORD.to_string(),
     );
-    let bitcoind_rpc_url = format!("http://127.0.0.1:{}", rpc_port);
-    let rpc_client =
-        BitcoinClient::new(&bitcoind_rpc_url, auth).expect("failed to create bitcoind RPC client");
 
     Some((subproc_handle, rpc_client))
 }
@@ -133,7 +162,7 @@ fn new_rpc_client() -> (Option<BitcoindSubprocessHandle>, BitcoinClient) {
         Some((subproc_handle, rpc_client)) => {
             // Wait for bitcoind to start.
             let start = time::Instant::now();
-            while start.elapsed() < time::Duration::from_secs(3) {
+            while start.elapsed() < BITCOIND_STARTUP_TIMEOUT {
                 if rpc_client.get_network_info().is_ok() {
                     return (Some(subproc_handle), rpc_client);
                 }
@@ -149,13 +178,14 @@ fn new_rpc_client() -> (Option<BitcoindSubprocessHandle>, BitcoinClient) {
             let bitcoind_auth_password = std::env::var("BITCOIND_RPC_AUTH_PASSWORD")
                 .expect("bitcoind not installed; missing BITCOIND_RPC_AUTH_PASSWORD");
 
-            let auth = Auth::UserPass(bitcoind_auth_username, bitcoind_auth_password);
-
             let bitcoind_rpc_url = std::env::var("BITCOIND_RPC_URL")
                 .unwrap_or_else(|_| DEFAULT_REGTEST_RPC_URL.to_string());
 
-            let rpc_client = BitcoinClient::new(&bitcoind_rpc_url, auth)
-                .expect("failed to create bitcoind RPC client");
+            let rpc_client = new_bitcoin_client(
+                &bitcoind_rpc_url,
+                bitcoind_auth_username,
+                bitcoind_auth_password,
+            );
 
             (None, rpc_client)
         }
@@ -178,7 +208,10 @@ fn check_regtest_wallet(rpc_client: &BitcoinClient, min_balance: Amount) {
         info.chain
     );
 
-    let mut wallet_info = rpc_client.get_wallet_info().unwrap_or_else(|_| {
+    // Make sure exactly one wallet is loaded. Bitcoin Core 31 no longer reports
+    // balances in `getwalletinfo`, so the wallet check and the balance check use
+    // `listwallets` and `getbalance` instead.
+    if rpc_client.list_wallets().unwrap().is_empty() {
         if let Some(wallet_name) = rpc_client.list_wallet_dir().unwrap().into_iter().next() {
             rpc_client.load_wallet(&wallet_name).unwrap();
         } else {
@@ -186,12 +219,12 @@ fn check_regtest_wallet(rpc_client: &BitcoinClient, min_balance: Amount) {
                 .create_wallet("dlctix_market_maker", None, None, None, None)
                 .unwrap();
         }
-        rpc_client.get_wallet_info().unwrap()
-    });
+    }
 
-    while wallet_info.balance < min_balance {
-        mine_blocks(&rpc_client, 101).expect("error mining blocks");
-        wallet_info = rpc_client.get_wallet_info().unwrap();
+    let mut balance = rpc_client.get_balance(None, None).unwrap();
+    while balance < min_balance {
+        mine_blocks(rpc_client, 101).expect("error mining blocks");
+        balance = rpc_client.get_balance(None, None).unwrap();
     }
 }
 
@@ -235,14 +268,27 @@ fn take_usable_utxo(rpc: &BitcoinClient, address: &Address, amount: Amount) -> (
     (outpoint, prevout)
 }
 
+/// Assert that `sendrawtransaction` rejected a transaction with mempool reject code
+/// -26 for the given reason. Only the stable part of the message is checked: Bitcoin
+/// Core 31 renamed the script-failure prefix from `mandatory-script-verify-flag-failed`
+/// to `mempool-script-verify-flag-failed` and appended the offending input, and older
+/// and newer nodes may differ again.
+fn assert_rejected(err: &bitcoincore_rpc::Error, reason: &str) {
+    let msg = err.to_string();
+    assert!(
+        msg.contains("code: -26") && msg.contains(reason),
+        "expected mempool rejection {reason:?}, got: {msg}"
+    );
+}
+
 fn mine_blocks(rpc: &BitcoinClient, n_blocks: u16) -> Result<(), bitcoincore_rpc::Error> {
     let address = rpc
         .get_new_address(None, Some(bitcoincore_rpc::json::AddressType::Bech32m))?
         .require_network(bitcoin::Network::Regtest)
         .unwrap();
 
-    // Break into chunks of 30 blocks each to avoid hitting the 15 second default
-    // timeout which bitcoincore_rpc won't let us configure.
+    // Mine in chunks so that every RPC call finishes comfortably within
+    // `RPC_TIMEOUT`, even on a slow machine.
     let mut remaining = n_blocks;
     while remaining != 0 {
         let chunk = remaining.min(30);
@@ -607,12 +653,13 @@ impl SimulationManager {
 impl std::ops::Drop for SimulationManager {
     fn drop(&mut self) {
         if let Some(mut handle) = self.bitcoind_handle.take() {
-            self.rpc.stop().expect("failed to stop bitcoind subprocess");
-            handle.child.wait().unwrap();
-            handle
-                .tempdir
-                .close()
-                .expect("failed to clean up temporary directory");
+            // Ask the node to shut down cleanly. If that fails, for example because the
+            // test is already panicking after an RPC error, dropping `handle` kills it.
+            // Never panic in here: a panic while unwinding aborts the whole test binary.
+            if self.rpc.stop().is_ok() {
+                let _ = handle.child.wait();
+            }
+            // `handle` drops here: kills the child if still running, then removes the datadir.
         }
     }
 }
@@ -664,11 +711,7 @@ fn with_on_chain_resolutions() {
         .rpc
         .send_raw_transaction(&split_tx)
         .expect_err("early broadcast of split TX should fail");
-    assert_eq!(
-        err.to_string(),
-        "JSON-RPC error: RPC error response: RpcError { code: -26, \
-            message: \"non-BIP68-final\", data: None }",
-    );
+    assert_rejected(&err, "non-BIP68-final");
 
     // Only after a block delay of `delta` should Alice be able to
     // broadcast the split TX.
@@ -754,12 +797,7 @@ fn with_on_chain_resolutions() {
             .rpc
             .send_raw_transaction(&invalid_bob_win_tx)
             .expect_err("early broadcast of win TX should fail");
-        assert_eq!(
-            err.to_string(),
-            "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"mandatory-script-verify-flag-failed (Locktime requirement not satisfied)\", \
-             data: None }",
-        );
+        assert_rejected(&err, "Locktime requirement not satisfied");
     }
 
     manager
@@ -821,12 +859,7 @@ fn with_on_chain_resolutions() {
             .rpc
             .send_raw_transaction(&invalid_reclaim_tx)
             .expect_err("early broadcast of split reclaim TX should fail");
-        assert_eq!(
-            err.to_string(),
-            "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"mandatory-script-verify-flag-failed (Locktime requirement not satisfied)\", \
-             data: None }",
-        );
+        assert_rejected(&err, "Locktime requirement not satisfied");
     }
 
     manager
@@ -1032,12 +1065,7 @@ fn market_maker_reclaims_outcome_tx() {
             .rpc
             .send_raw_transaction(&invalid_reclaim_tx)
             .expect_err("early broadcast of outcome reclaim TX should fail");
-        assert_eq!(
-            err.to_string(),
-            "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"mandatory-script-verify-flag-failed (Locktime requirement not satisfied)\", \
-             data: None }",
-        );
+        assert_rejected(&err, "Locktime requirement not satisfied");
     }
 
     manager
@@ -1059,11 +1087,7 @@ fn market_maker_reclaims_outcome_tx() {
             .rpc
             .send_raw_transaction(&reclaim_tx)
             .expect_err("early broadcast of reclaim TX should fail");
-        assert_eq!(
-            err.to_string(),
-            "JSON-RPC error: RPC error response: RpcError { code: -26, \
-                message: \"non-BIP68-final\", data: None }",
-        );
+        assert_rejected(&err, "non-BIP68-final");
 
         manager.mine_delta_blocks().unwrap();
     }
@@ -1092,11 +1116,7 @@ fn contract_expiry_on_chain_resolution() {
         .rpc
         .send_raw_transaction(&expiry_tx)
         .expect_err("early broadcast of expiry TX should fail");
-    assert_eq!(
-        err.to_string(),
-        "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"non-final\", data: None }",
-    );
+    assert_rejected(&err, "non-final");
 
     manager.mine_until_expiry().unwrap();
     manager
@@ -1122,11 +1142,7 @@ fn contract_expiry_on_chain_resolution() {
         .rpc
         .send_raw_transaction(&split_tx)
         .expect_err("early broadcast of split TX should fail");
-    assert_eq!(
-        err.to_string(),
-        "JSON-RPC error: RPC error response: RpcError { code: -26, \
-            message: \"non-BIP68-final\", data: None }",
-    );
+    assert_rejected(&err, "non-BIP68-final");
 
     // Only after a block delay of `delta` should Dave be able to
     // broadcast the split TX.
@@ -1170,12 +1186,7 @@ fn contract_expiry_on_chain_resolution() {
             .rpc
             .send_raw_transaction(&invalid_dave_win_tx)
             .expect_err("early broadcast of win TX should fail");
-        assert_eq!(
-            err.to_string(),
-            "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"mandatory-script-verify-flag-failed (Locktime requirement not satisfied)\", \
-             data: None }",
-        );
+        assert_rejected(&err, "Locktime requirement not satisfied");
     }
 
     manager
@@ -1216,11 +1227,7 @@ fn contract_expiry_all_winners_cooperate() {
         .rpc
         .send_raw_transaction(&expiry_tx)
         .expect_err("early broadcast of expiry TX should fail");
-    assert_eq!(
-        err.to_string(),
-        "JSON-RPC error: RPC error response: RpcError { code: -26, \
-             message: \"non-final\", data: None }",
-    );
+    assert_rejected(&err, "non-final");
 
     manager.mine_until_expiry().unwrap();
     manager

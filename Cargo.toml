@@ -6,7 +6,7 @@ authors = ["conduition <conduition@proton.me>"]
 description = "Ticketed Discreet Log Contracts"
 readme = "README.md"
 license = "Unlicense"
-repository = "https://github.com/conduition/ticketed-dlc"
+repository = "https://github.com/tee8z/dlctix"
 keywords = ["dlc", "smart", "contract", "ticket", "auction"]
 exclude = ["/img"]
 

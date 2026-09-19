@@ -51,13 +51,14 @@ See the `dlctix::signing` module documentation for the key-aggregation, adaptor-
 
 - **Validate parameters independently.** Every party should recompute the oracle locking points from the oracle's announcement and check every field of the `ContractParameters` they receive (their own `Player` entry, payouts, fee rate, locktime delta, funding value) rather than trusting the market maker. `ContractParameters::validate` rejects malformed parameters, but it cannot know what you agreed to.
 - **Verify signatures before committing funds.** The market maker must verify the complete signature set before broadcasting the funding transaction, and a player must verify the signatures for the outcomes they can win before buying a ticket. `SigningSession` does this for you; the external signing API requires `TicketedDLC::into_signed_contract` or `verify_signatures`. The funding output is an n-of-n key with no timeout, so a contract funded with an invalid signature set can only be recovered with every player's cooperation.
-- **Fixed fees, no fee bumping.** All pre-signed transactions carry a fixed fee rate and have no anchor output. No party can fee-bump an outcome or split transaction unilaterally, and the split transaction must confirm between Δ and 2Δ blocks after the outcome transaction, or the market maker can reclaim the funds. Choose a conservative `fee_rate` and `relative_locktime_block_delta`, and consider signing several contracts at different fee rates.
-- **Expiry.** With `expiry: None` there is no expiry transaction. If the oracle never attests, the market maker's capital stays locked until every player cooperates in a funding-close transaction.
-- **Watch the chain.** Ticket holders must broadcast the split transaction and their win transaction within the Δ-block windows, or the market maker's reclaim paths mature.
+- **Fixed fees, no fee bumping.** All pre-signed transactions carry a fixed fee rate and have no anchor output. No party can fee-bump an outcome or split transaction unilaterally. The split transaction can confirm as early as the same block as the outcome transaction, but it must confirm before the market maker's reclaim path matures 2Δ blocks after the outcome transaction, or the market maker can reclaim the funds. Choose a conservative `fee_rate` and `relative_locktime_block_delta`, and consider signing several contracts at different fee rates.
+- **Expiry.** With `expiry: None` there is no expiry transaction. If the oracle never attests, the market maker's capital stays locked until every player cooperates in a funding-close transaction. Conversely, the expiry transaction carries a plain (non-adaptor) signature, so an expiry at or below the current chain tip lets anyone resolve the contract to the expiry payout map without an oracle attestation - check the expiry is comfortably in the future before agreeing to the parameters.
+- **Watch the chain.** Ticket holders must broadcast the split transaction before the outcome transaction's 2Δ-block reclaim matures, and their win transaction within Δ blocks after the split transaction confirms, or the market maker's reclaim paths mature.
 - **Authenticate your peers.** The library identifies signers only by public key. The application must authenticate the network peer behind each key, or a malicious peer could submit nonces or partial signatures under another signer's key and stall the session.
 - **Untrusted input.** Deserializing a `TicketedDLC` or `SignedContract` rebuilds every transaction. Bound the number of players and outcomes before deserializing data from an untrusted source.
 - **Secret handling.** Neither this crate nor the `secp`, `musig2`, or `secp256k1` crates zeroize secret keys, nonces, or preimages on drop. Manage secret lifetimes in your application if that matters to your threat model.
 - **Preimages are one-time secrets.** Ticket and payout preimages must be unique per player. `validate` enforces distinct ticket hashes, distinct payout hashes, and no overlap between the two sets, because revealing one preimage would otherwise unlock a spending path guarded by another.
+- **One key per entry.** Every `Player` entry needs a public key distinct from every other player and from the market maker. Signing sessions identify signers by public key, so a shared key can never complete a session, and funding such a contract would lock the market maker's capital in an n-of-n output with no timeout. `validate` rejects duplicate keys. A person who wants multiple entries in the same contract (e.g. several lottery tickets) should join once per entry with a fresh ephemeral key, ticket hash, and payout hash each time - keys are cheap, and the on-chain footprint is identical either way.
 
 ## Walkthrough
 
@@ -85,7 +86,7 @@ For tests to pass, the `bitcoind` binary should be in your executable `PATH`.
 > As an alternative to installing `bitcoind` locally, you can designate a remotely-accessible regtest node and run tests against that. Fill in a `.env` file in the root of the `dlctix` repo folder:
 >
 > ```env
-> BITCOIND_RPC_ADDRESS=http://some-remote.url:18443
+> BITCOIND_RPC_URL=http://some-remote.url:18443
 > BITCOIND_RPC_AUTH_USERNAME=<your_nodes_rpc_username>
 > BITCOIND_RPC_AUTH_PASSWORD=<your_nodes_rpc_password>
 > ```

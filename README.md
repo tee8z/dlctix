@@ -41,6 +41,12 @@ To demonstrate the practicality of this approach, we have [a series of integrati
 
 <img width="70%" src="img/ticketed-dlc-diagram.png">
 
+## External signing
+
+`SigningSession` is the recommended way to sign a contract. If your signing keys live in an HSM, a secure enclave, or a non-Rust MuSig2 implementation, use `TicketedDLC::signing_data` instead. It returns a `SigningData` struct containing every sighash, adaptor point, ordered signer set, and aggregate key needed to sign the contract with any BIP-327 implementation. Assemble the aggregated results into a `ContractSignatures` and pass it to `TicketedDLC::into_signed_contract`, which verifies every signature before constructing the `SignedContract`. Never fund a contract, and never buy a ticket, whose signatures you have not verified.
+
+See the `dlctix::signing` module documentation for the key-aggregation, adaptor-signature, and nonce-safety rules an external signer must follow, and [`tests/external_signing.rs`](./tests/external_signing.rs) for an end-to-end example.
+
 ## Walkthrough
 
 To see an example, see [the basic integration test](./tests/basic.rs) which includes very detailed comments and descriptions of everything happening during the DLC construction, signing, and execution phases.

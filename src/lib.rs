@@ -64,6 +64,7 @@
 //!   per player. Revealing one preimage must never unlock a spending path guarded by
 //!   another, which is why [`ContractParameters::validate`] requires distinct ticket
 //!   hashes, distinct payout hashes, and no overlap between the two sets.
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 #[cfg(test)]

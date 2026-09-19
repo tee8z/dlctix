@@ -132,14 +132,17 @@ impl TicketedDLC {
         }
     }
 
-    /// Extract all data needed to sign DLC transactions externally.
+    /// Extract all data needed to sign the DLC transactions externally.
     ///
     /// This is an alternative to [`SigningSession`] for signing with an external
-    /// system such as an HSM or custom MuSig2 implementation.
+    /// system such as an HSM or a non-Rust MuSig2 implementation. See the
+    /// [`signing`] module documentation for the rules an external signer must
+    /// follow, and verify the result with [`TicketedDLC::into_signed_contract`].
     pub fn signing_data(&self) -> Result<signing::SigningData, Error> {
         let mut outcome_sighashes = BTreeMap::new();
         let mut adaptor_points = BTreeMap::new();
         let mut split_sighashes = BTreeMap::new();
+        let mut split_signers = BTreeMap::new();
         let mut split_agg_pubkeys = BTreeMap::new();
 
         let funding_spend_info = self.outcome_tx_build.funding_spend_info();
@@ -165,11 +168,10 @@ impl TicketedDLC {
                 .get(outcome)
                 .ok_or(Error::UnknownOutcome)?;
 
-            // Store the untweaked aggregate pubkey for this outcome
-            let agg_pubkey: Point = outcome_spend_info
-                .key_agg_ctx_untweaked()
-                .aggregated_pubkey();
-            split_agg_pubkeys.insert(*outcome, agg_pubkey);
+            // Store the ordered signer set and untweaked aggregate pubkey for this outcome.
+            let split_ctx = outcome_spend_info.key_agg_ctx_untweaked();
+            split_signers.insert(*outcome, split_ctx.pubkeys().to_vec());
+            split_agg_pubkeys.insert(*outcome, split_ctx.aggregated_pubkey::<Point>());
 
             // Get sighashes for each win condition
             if let Some(payout_map) = self.params.outcome_payouts.get(outcome) {
@@ -184,14 +186,18 @@ impl TicketedDLC {
             }
         }
 
-        // Get the tweaked funding aggregate pubkey
-        let funding_agg_pubkey: Point = funding_spend_info.key_agg_ctx().aggregated_pubkey();
+        // The funding output key is the untweaked MuSig2 aggregate of all signers.
+        let funding_ctx = funding_spend_info.key_agg_ctx();
+        let funding_signers = funding_ctx.pubkeys().to_vec();
+        let funding_agg_pubkey: Point = funding_ctx.aggregated_pubkey();
 
         Ok(signing::SigningData {
             outcome_sighashes,
             adaptor_points,
             split_sighashes,
+            funding_signers,
             funding_agg_pubkey,
+            split_signers,
             split_agg_pubkeys,
         })
     }
@@ -206,8 +212,68 @@ impl TicketedDLC {
         self.split_tx_build.split_txs()
     }
 
-    /// Construct a [`SignedContract`] from externally-provided signatures.
-    pub fn into_signed_contract(self, signatures: ContractSignatures) -> SignedContract {
+    /// Verify a set of aggregated signatures against this DLC from the perspective
+    /// of the signer `our_pubkey`.
+    ///
+    /// Every outcome transaction in which `our_pubkey` could win something, and every
+    /// split transaction spending path which `our_pubkey` could claim, must have a
+    /// valid signature. If `our_pubkey` is the market maker's key, every signature
+    /// in the contract is verified. Returns an error if any relevant signature is
+    /// missing or invalid, or if `our_pubkey` does not belong to the contract.
+    ///
+    /// Use this on signatures produced outside a [`SigningSession`], for example by
+    /// an HSM using [`TicketedDLC::signing_data`], before funding the contract or
+    /// buying a ticket. An unverified signature set can leave the market maker's
+    /// capital locked in the funding output until every player cooperates.
+    pub fn verify_signatures(
+        &self,
+        our_pubkey: Point,
+        signatures: &ContractSignatures,
+    ) -> Result<(), Error> {
+        contract::outcome::verify_outcome_tx_aggregated_signatures(
+            &self.params,
+            our_pubkey,
+            &self.outcome_tx_build,
+            &signatures.outcome_tx_signatures,
+            signatures.expiry_tx_signature,
+        )?;
+
+        contract::split::verify_split_tx_aggregated_signatures(
+            &self.params,
+            our_pubkey,
+            &self.outcome_tx_build,
+            &self.split_tx_build,
+            &signatures.split_tx_signatures,
+        )?;
+
+        Ok(())
+    }
+
+    /// Verify externally-provided signatures with [`TicketedDLC::verify_signatures`]
+    /// from the perspective of `our_pubkey`, and if they are valid, consume this DLC
+    /// into a [`SignedContract`].
+    ///
+    /// Returns an error, and does not construct the contract, if any signature
+    /// relevant to `our_pubkey` is missing or invalid.
+    pub fn into_signed_contract(
+        self,
+        our_pubkey: Point,
+        signatures: ContractSignatures,
+    ) -> Result<SignedContract, Error> {
+        self.verify_signatures(our_pubkey, &signatures)?;
+        Ok(SignedContract {
+            signatures,
+            dlc: self,
+        })
+    }
+
+    /// Construct a [`SignedContract`] from externally-provided signatures **without
+    /// verifying them**.
+    ///
+    /// Only use this if the signatures were already verified with
+    /// [`TicketedDLC::verify_signatures`]. Funding a contract whose signatures were
+    /// never verified can lock the market maker's capital permanently.
+    pub fn into_signed_contract_unchecked(self, signatures: ContractSignatures) -> SignedContract {
         SignedContract {
             signatures,
             dlc: self,
@@ -581,23 +647,7 @@ impl SigningSession<ContributorPartialSignatureSharingRound> {
         &self,
         signatures: &ContractSignatures,
     ) -> Result<(), Error> {
-        contract::outcome::verify_outcome_tx_aggregated_signatures(
-            &self.dlc.params,
-            self.our_public_key,
-            &self.dlc.outcome_tx_build,
-            &signatures.outcome_tx_signatures,
-            signatures.expiry_tx_signature,
-        )?;
-
-        contract::split::verify_split_tx_aggregated_signatures(
-            &self.dlc.params,
-            self.our_public_key,
-            &self.dlc.outcome_tx_build,
-            &self.dlc.split_tx_build,
-            &signatures.split_tx_signatures,
-        )?;
-
-        Ok(())
+        self.dlc.verify_signatures(self.our_public_key, signatures)
     }
 
     /// Consume the `SigningSession` and convert it into a [`SignedContract`]

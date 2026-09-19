@@ -6,9 +6,12 @@ This project is part of the [Backdrop Build V3 cohort](https://backdropbuild.com
 
 <img width="40%" src="img/backdrop-build-v3.png">
 
+> [!IMPORTANT]
+> As of 2026-05-12, this repository and the Rust crate have been transferred to a new owner, as the original author ([@conduition](https://github.com/conduition)) no longer has time to maintain them.
+
 ### Summary
 
-To read more about this concept in detail, [see my full blog post](https://conduition.io/scriptless/ticketed-dlc/).
+To read more about this concept in detail, [see this full blog post](https://conduition.io/scriptless/ticketed-dlc/).
 
 A group of people don't trust each other, but DO trust some 3rd-party mediator called an _Oracle._ They want to wager money on some future event and redistribute the money depending on which outcome occurs (if any), according to the Oracle. Real-world examples include:
 
@@ -20,7 +23,7 @@ A group of people don't trust each other, but DO trust some 3rd-party mediator c
 
 [Discreet Log Contracts (DLCs)](https://bitcoinops.org/en/topics/discreet-log-contracts/) enable this kind of conditional payment to be executed natively on Bitcoin, with great efficiency. They have been known about for many years, but traditional DLCs are not scaleable to large contracts with many people buying in with very small amounts, such as lotteries or crowdfunding, because a traditional DLC requires on-chain Bitcoin contributions _from every participant_ in the DLC who is buying in - otherwise the contract would not be secure. The fees on such a jointly-funded contract quickly become impractical. There are also privacy issues: Every participant would be permanently associating their on-chain bitcoins with the DLC in question.
 
-With my Ticketed DLCs approach, a single untrusted party called the Market Maker can lease their on-chain capital to use for the on-chain DLC, while buy-ins from the DLC contestants are instead paid to the Market Maker using off-chain payment protocols such as [Fedimint eCash](https://fedimint.org/) or [Lightning](https://lightning.network). The Market Maker can profit from this arrangement by charging the contestants an up-front fee which covers the opportunity cost of locking their on-chain capital for the duration of the DLC.
+With a Ticketed DLCs approach, a single untrusted party called the Market Maker can lease their on-chain capital to use for the on-chain DLC, while buy-ins from the DLC contestants are instead paid to the Market Maker using off-chain payment protocols such as [Fedimint eCash](https://fedimint.org/) or [Lightning](https://lightning.network). The Market Maker can profit from this arrangement by charging the contestants an up-front fee which covers the opportunity cost of locking their on-chain capital for the duration of the DLC.
 
 DLC contestants buy specific SHA256 preimages called _ticket secrets_ from the Market Maker off-chain. In so doing, a DLC contestant is buying the ability to redeem potential payouts from the DLC. Without the correct ticket secret, any winnings instead return to the Market Maker.
 
@@ -34,9 +37,15 @@ This repository is a reusable Rust implementation of the Ticketed DLC contract u
 
 It implements the transaction-building, multisignature-signing, and validation steps needed for all parties (both contestants and the Market Maker) to successfully execute a Ticketed DLC on and off-chain. It _does not_ include any networking code, nor does it package a Bitcoin or Lightning Network wallet. Rather, this crate is a generic building block for higher-level applications which can implement Ticketed DLCs in more specific contexts.
 
-To demonstrate the practicality of this approach, I have written [a series of integration tests](./src/regtest.rs) which leverage a remote [Bitcoin Regtest Node](https://bisq.network/blog/how-to-set-up-bitcoin-regtest/) to simulate and test the various stages and paths of the Ticketed DLC's on-chain execution. The best way to visualize these stages is with a transaction diagram.
+To demonstrate the practicality of this approach, we have [a series of integration tests](./src/regtest.rs) which leverage a remote [Bitcoin Regtest Node](https://bisq.network/blog/how-to-set-up-bitcoin-regtest/) to simulate and test the various stages and paths of the Ticketed DLC's on-chain execution. The best way to visualize these stages is with a transaction diagram.
 
 <img width="70%" src="img/ticketed-dlc-diagram.png">
+
+## External signing
+
+`SigningSession` is the recommended way to sign a contract. If your signing keys live in an HSM, a secure enclave, or a non-Rust MuSig2 implementation, use `TicketedDLC::signing_data` instead. It returns a `SigningData` struct containing every sighash, adaptor point, ordered signer set, and aggregate key needed to sign the contract with any BIP-327 implementation. Assemble the aggregated results into a `ContractSignatures` and pass it to `TicketedDLC::into_signed_contract`, which verifies every signature before constructing the `SignedContract`. Never fund a contract, and never buy a ticket, whose signatures you have not verified.
+
+See the `dlctix::signing` module documentation for the key-aggregation, adaptor-signature, and nonce-safety rules an external signer must follow, and [`tests/external_signing.rs`](./tests/external_signing.rs) for an end-to-end example.
 
 ## Walkthrough
 
@@ -49,7 +58,7 @@ To run the integration tests, you'll need a [Bitcoin Regtest Node](https://bisq.
 ### 1. Clone this repo.
 
 ```console
-git clone https://github.com/conduition/dlctix.git
+git clone https://github.com/tee8z/dlctix.git
 ```
 
 ### 2. [Install Rust](https://rustup.rs/)

@@ -86,8 +86,10 @@ impl OutcomeSpendInfo {
                     // Check joint signature: <joint_pk> OP_CHECKSIG
                     .push_slice(joint_outcome_pubkey.serialize_xonly())
                     .push_opcode(OP_CHECKSIG)
-                    // Don't need OP_CSV.
-                    // Sequence number is enforced by multisig key: split TX is pre-signed.
+                    // No OP_CSV: the split TX may confirm as soon as the outcome TX
+                    // does. The market maker's reclaim leaf below still gives
+                    // ticketholders a 2*delta head start, and the win script on the
+                    // split TX output enforces its own `delta` delay.
                     .into_script();
 
                 (player_index, script)

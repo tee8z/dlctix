@@ -11,8 +11,16 @@ pub struct EventLockingConditions {
     /// should have its discrete log revealed by the oracle when and if that outcome occurs.
     pub locking_points: Vec<MaybePoint>,
 
-    /// The unix timestamp beyond which the oracle is considered to have gone AWOL.
+    /// The consensus locktime (a block height if below 500,000,000, otherwise a
+    /// unix timestamp) beyond which the oracle is considered to have gone AWOL.
     /// If set to `None`, the event has no expected expiry.
+    ///
+    /// The expiry transaction is signed with a plain (non-adaptor) signature, so
+    /// once this height or time has passed, anyone holding the signed contract can
+    /// broadcast it and resolve the contract to the [`Outcome::Expiry`] payout map
+    /// without any oracle attestation. Choose a value comfortably in the future:
+    /// an expiry at or below the current chain tip makes the expiry transaction
+    /// spendable as soon as the funding transaction confirms.
     pub expiry: Option<u32>,
 }
 

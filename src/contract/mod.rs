@@ -558,7 +558,7 @@ mod tests {
                 ),
                 (Outcome::Expiry, PayoutWeights::from([(1, 1)])),
             ]),
-            fee_rate: FeeRate::from_sat_per_vb_unchecked(10),
+            fee_rate: FeeRate::from_sat_per_vb_u32(10),
             funding_value: Amount::from_sat(100_000),
             relative_locktime_block_delta: 144,
         }

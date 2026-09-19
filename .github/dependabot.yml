@@ -1,0 +1,27 @@
+# Dependabot version updates. Dependabot alerts and automated security updates
+# are enabled in the repository settings and do not depend on this file.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Cargo.toml keeps caret requirements so downstream crates can unify these
+    # dependencies with their own. Dependabot only bumps Cargo.lock, which is what
+    # CI and `cargo audit` run against, so every bump is still a reviewed PR.
+    # Semver-incompatible (major) upgrades need a manual Cargo.toml change.
+    versioning-strategy: "lockfile-only"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-lockfile:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"

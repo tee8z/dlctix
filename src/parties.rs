@@ -17,10 +17,12 @@ pub struct MarketMaker {
 /// their ticket hash (usually by purchasing it via Lightning), they can
 /// claim winnings from DLC outcomes.
 ///
-/// The same pubkey can participate in the same ticketed DLC under different
-/// ticket hashes, so players might share common pubkeys. However, for the
-/// economics of the contract to work, every player should be allocated
-/// their own completely unique ticket hash.
+/// Every player must use a public key which is distinct from every other
+/// player's key and from the market maker's key, along with a unique ticket
+/// hash and a unique payout hash. Signing sessions identify signers by key, so
+/// a shared key can never complete a session, and a reused hash would let one
+/// revealed preimage unlock another player's spending path. The same person may
+/// join a DLC several times using a fresh key and fresh hashes each time.
 #[derive(Debug, Clone, Ord, PartialOrd, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Player {
     /// An ephemeral public key controlled by the player.

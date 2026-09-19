@@ -96,9 +96,13 @@ impl OutcomeSpendInfo {
 
         // The reclaim script, used by the market maker to recover their capital
         // if none of the winning players bought their ticket preimages.
+        //
+        // The delay saturates rather than wrapping, so it can never mature before
+        // the split TX's `delta` delay. `ContractParameters::validate` bounds `delta`
+        // so that saturation never actually occurs.
         let reclaim_script = bitcoin::script::Builder::new()
             // Check relative locktime: <2*delta> OP_CSV OP_DROP
-            .push_int(2 * block_delta as i64)
+            .push_int(i64::from(block_delta.saturating_mul(2)))
             .push_opcode(OP_CSV)
             .push_opcode(OP_DROP)
             // Check signature from market maker: <mm_pubkey> OP_CHECKSIG

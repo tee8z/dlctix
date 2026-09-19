@@ -3,7 +3,7 @@ pub(crate) mod outcome;
 pub(crate) mod split;
 
 use bitcoin::{transaction::InputWeightPrediction, Amount, FeeRate, TxOut};
-use secp::Point;
+use secp::{MaybePoint, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -48,8 +48,13 @@ pub struct ContractParameters {
     /// The market maker who provides capital for the DLC ticketing process.
     pub market_maker: MarketMaker,
 
-    /// The set of players in the DLC. Two players in the same DLC _may_ share
-    /// the same public key, but MUST NOT share the same payout hash or ticket hash.
+    /// The set of players in the DLC.
+    ///
+    /// Every player MUST use a public key which is distinct from every other
+    /// player's key and from the market maker's key, and MUST have a unique ticket
+    /// hash and a unique payout hash. The same person may join a DLC several times,
+    /// but must do so with a fresh key and fresh hashes each time. [`validate`][Self::validate]
+    /// enforces these rules.
     pub players: Vec<Player>,
 
     /// The event whose outcome determines the payouts.
@@ -81,6 +86,10 @@ pub struct ContractParameters {
 
     /// A reasonable number of blocks within which a transaction can confirm.
     /// Used for enforcing relative locktime timeout spending conditions.
+    ///
+    /// Winners can spend after this many blocks; the market maker's reclaim paths
+    /// mature after twice this many blocks. Must be between `1` and
+    /// [`MAX_RELATIVE_LOCKTIME_BLOCK_DELTA`][Self::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA].
     ///
     /// Reasonable values are:
     ///
@@ -114,18 +123,71 @@ pub struct WinCondition {
 }
 
 impl ContractParameters {
-    /// Verifies the parameters are in standardized format, checking for
-    /// errors such as duplicate players or zero-value payouts.
-    pub fn validate(&self) -> Result<(), Error> {
-        let uniq_ticket_hashes: BTreeSet<&[u8; 32]> = self
-            .players
-            .iter()
-            .map(|player| &player.ticket_hash)
-            .collect();
+    /// The largest permitted [`relative_locktime_block_delta`][Self::relative_locktime_block_delta].
+    ///
+    /// The market maker's reclaim paths are delayed by twice the delta, and that
+    /// doubled value must still fit in the 16-bit block-height field of a BIP-68
+    /// relative locktime. A larger delta would wrap around and make the reclaim
+    /// paths mature *before* the winners' paths.
+    pub const MAX_RELATIVE_LOCKTIME_BLOCK_DELTA: u16 = 0x7FFF;
 
-        // This would imply the players array contains duplicate ticket hashes.
-        if uniq_ticket_hashes.len() != self.players.len() {
-            return Err(Error::DuplicateTicketHash);
+    /// Verifies the parameters are in standardized format and would produce a
+    /// contract which is safe to enforce. This is run by
+    /// [`TicketedDLC::new`][crate::TicketedDLC::new].
+    ///
+    /// The following are rejected:
+    ///
+    /// - no outcomes, an outcome with no winners, or a zero payout weight;
+    /// - a player index which does not exist, or an outcome the event cannot produce;
+    /// - duplicate ticket hashes, duplicate payout hashes, or a payout hash equal to
+    ///   a ticket hash, since revealing one preimage would unlock a path guarded by
+    ///   the other;
+    /// - a public key shared by two players, or by a player and the market maker,
+    ///   since MuSig2 signing sessions identify signers by key;
+    /// - an oracle locking point at infinity, which would make an outcome
+    ///   transaction spendable without any attestation;
+    /// - payout weights so large that payout amounts would overflow;
+    /// - a zero fee rate, a zero funding value, or a locktime delta outside
+    ///   `1..=MAX_RELATIVE_LOCKTIME_BLOCK_DELTA`.
+    pub fn validate(&self) -> Result<(), Error> {
+        // A contract with no outcomes can never be resolved except cooperatively.
+        if self.outcome_payouts.is_empty() {
+            return Err(Error::EmptyOutcomePayouts);
+        }
+
+        // Ticket and payout hashes must be unique, and the two sets disjoint.
+        let mut ticket_hashes = BTreeSet::<&[u8; 32]>::new();
+        let mut payout_hashes = BTreeSet::<&[u8; 32]>::new();
+        for player in self.players.iter() {
+            if !ticket_hashes.insert(&player.ticket_hash) {
+                return Err(Error::DuplicateTicketHash);
+            }
+            if !payout_hashes.insert(&player.payout_hash) {
+                return Err(Error::DuplicatePayoutHash);
+            }
+        }
+        if !ticket_hashes.is_disjoint(&payout_hashes) {
+            return Err(Error::TicketPayoutHashCollision);
+        }
+
+        // Every signer must have a distinct key. Nonces and partial signatures are
+        // keyed by pubkey, so a duplicated key can never complete a signing session.
+        let mut pubkeys = BTreeSet::from([self.market_maker.pubkey]);
+        for player in self.players.iter() {
+            if !pubkeys.insert(player.pubkey) {
+                return Err(Error::DuplicatePubkey);
+            }
+        }
+
+        // An adaptor point at infinity turns an adaptor signature into a plain
+        // signature, so the outcome could be unlocked without any attestation.
+        if self
+            .event
+            .locking_points
+            .iter()
+            .any(|point| matches!(point, MaybePoint::Infinity))
+        {
+            return Err(Error::InvalidLockingPoint);
         }
 
         for (outcome, payout_map) in self.outcome_payouts.iter() {
@@ -135,10 +197,11 @@ impl ContractParameters {
             }
 
             // Check for empty payout map.
-            if payout_map.len() == 0 {
+            if payout_map.is_empty() {
                 return Err(Error::EmptyPayoutMap);
             }
 
+            let mut total_weight: u64 = 0;
             for (&player_index, &weight) in payout_map.iter() {
                 // Check for zero payout weights.
                 if weight == 0 {
@@ -149,25 +212,49 @@ impl ContractParameters {
                 if player_index >= self.players.len() {
                     return Err(Error::OutOfBoundsPlayerIndex);
                 }
+
+                total_weight = total_weight
+                    .checked_add(weight)
+                    .ok_or(Error::PayoutWeightOverflow)?;
             }
+
+            // Payouts are computed as `value * weight / total_weight`, so the
+            // product of the funding value and the total weight must fit in a u64.
+            self.funding_value
+                .to_sat()
+                .checked_mul(total_weight)
+                .ok_or(Error::PayoutWeightOverflow)?;
         }
 
         // Must use a non-zero fee rate.
         if self.fee_rate == FeeRate::ZERO {
-            return Err(Error::InvalidFeeAmount);
+            return Err(Error::InvalidFeeRate);
         }
 
-        // Must use a non-zero locktime delta
-        if self.relative_locktime_block_delta == 0 {
+        // The locktime delta must be non-zero, and twice the delta must still be
+        // encodable as a BIP-68 block-height relative locktime.
+        if self.relative_locktime_block_delta == 0
+            || self.relative_locktime_block_delta > Self::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA
+        {
             return Err(Error::InvalidLocktime);
         }
 
         // Must be funded by some fixed non-zero amount.
-        if self.funding_value < Amount::ZERO {
-            return Err(Error::InsufficientFunds);
+        if self.funding_value == Amount::ZERO {
+            return Err(Error::InvalidFundingValue);
         }
 
         Ok(())
+    }
+
+    /// The relative block delay after which the market maker can reclaim an
+    /// outcome transaction output or a split transaction output: twice
+    /// [`relative_locktime_block_delta`][Self::relative_locktime_block_delta].
+    ///
+    /// Saturates at `u16::MAX` so that the reclaim delay can never wrap around to
+    /// a value below the winners' delay, even for unvalidated parameters.
+    pub fn reclaim_block_delay(&self) -> u16 {
+        self.relative_locktime_block_delta.saturating_mul(2)
     }
 
     /// Returns the transaction output which the funding transaction should pay to.
@@ -190,8 +277,8 @@ impl ContractParameters {
 
     /// Returns the set of player indexes which this pubkey can sign for.
     ///
-    /// This might contain multiple players if the same key joined the DLC
-    /// with different ticket/payout hashes.
+    /// For validated parameters this contains at most one index, since every
+    /// player must use a distinct key.
     pub fn players_controlled_by_pubkey(&self, pubkey: Point) -> BTreeSet<PlayerIndex> {
         self.players
             .iter()
@@ -432,5 +519,197 @@ impl<T> SigMap<T> {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracles::EventLockingConditions;
+    use secp::{MaybePoint, Scalar};
+
+    fn key(i: u8) -> Point {
+        let mut bytes = [0u8; 32];
+        bytes[31] = i;
+        Scalar::from_slice(&bytes).unwrap().base_point_mul()
+    }
+
+    fn player(i: u8) -> Player {
+        Player {
+            pubkey: key(i),
+            ticket_hash: [i; 32],
+            payout_hash: [100 + i; 32],
+        }
+    }
+
+    fn valid_params() -> ContractParameters {
+        ContractParameters {
+            market_maker: MarketMaker { pubkey: key(200) },
+            players: vec![player(1), player(2)],
+            event: EventLockingConditions {
+                locking_points: vec![MaybePoint::Valid(key(50)), MaybePoint::Valid(key(51))],
+                expiry: Some(1_000),
+            },
+            outcome_payouts: BTreeMap::from([
+                (Outcome::Attestation(0), PayoutWeights::from([(0, 1)])),
+                (
+                    Outcome::Attestation(1),
+                    PayoutWeights::from([(0, 1), (1, 3)]),
+                ),
+                (Outcome::Expiry, PayoutWeights::from([(1, 1)])),
+            ]),
+            fee_rate: FeeRate::from_sat_per_vb_u32(10),
+            funding_value: Amount::from_sat(100_000),
+            relative_locktime_block_delta: 144,
+        }
+    }
+
+    #[test]
+    fn accepts_valid_parameters() {
+        valid_params().validate().expect("valid parameters");
+    }
+
+    #[test]
+    fn rejects_empty_outcome_payouts() {
+        let mut p = valid_params();
+        p.outcome_payouts.clear();
+        assert!(matches!(p.validate(), Err(Error::EmptyOutcomePayouts)));
+    }
+
+    #[test]
+    fn rejects_duplicate_ticket_hash() {
+        let mut p = valid_params();
+        p.players[1].ticket_hash = p.players[0].ticket_hash;
+        assert!(matches!(p.validate(), Err(Error::DuplicateTicketHash)));
+    }
+
+    #[test]
+    fn rejects_duplicate_payout_hash() {
+        let mut p = valid_params();
+        p.players[1].payout_hash = p.players[0].payout_hash;
+        assert!(matches!(p.validate(), Err(Error::DuplicatePayoutHash)));
+    }
+
+    #[test]
+    fn rejects_ticket_payout_hash_collision() {
+        // Own ticket hash reused as payout hash.
+        let mut p = valid_params();
+        p.players[0].payout_hash = p.players[0].ticket_hash;
+        assert!(matches!(
+            p.validate(),
+            Err(Error::TicketPayoutHashCollision)
+        ));
+
+        // Another player's ticket hash used as payout hash.
+        let mut p = valid_params();
+        p.players[0].payout_hash = p.players[1].ticket_hash;
+        assert!(matches!(
+            p.validate(),
+            Err(Error::TicketPayoutHashCollision)
+        ));
+    }
+
+    #[test]
+    fn rejects_shared_pubkeys() {
+        let mut p = valid_params();
+        p.players[1].pubkey = p.players[0].pubkey;
+        assert!(matches!(p.validate(), Err(Error::DuplicatePubkey)));
+
+        let mut p = valid_params();
+        p.players[0].pubkey = p.market_maker.pubkey;
+        assert!(matches!(p.validate(), Err(Error::DuplicatePubkey)));
+    }
+
+    #[test]
+    fn rejects_locking_point_at_infinity() {
+        let mut p = valid_params();
+        p.event.locking_points[1] = MaybePoint::Infinity;
+        assert!(matches!(p.validate(), Err(Error::InvalidLockingPoint)));
+    }
+
+    #[test]
+    fn rejects_unknown_outcome_and_bad_payout_maps() {
+        let mut p = valid_params();
+        p.outcome_payouts
+            .insert(Outcome::Attestation(2), PayoutWeights::from([(0, 1)]));
+        assert!(matches!(p.validate(), Err(Error::UnknownOutcome)));
+
+        let mut p = valid_params();
+        p.event.expiry = None;
+        assert!(matches!(p.validate(), Err(Error::UnknownOutcome)));
+
+        let mut p = valid_params();
+        p.outcome_payouts
+            .insert(Outcome::Attestation(0), PayoutWeights::new());
+        assert!(matches!(p.validate(), Err(Error::EmptyPayoutMap)));
+
+        let mut p = valid_params();
+        p.outcome_payouts
+            .insert(Outcome::Attestation(0), PayoutWeights::from([(0, 0)]));
+        assert!(matches!(p.validate(), Err(Error::InvalidPayoutWeight)));
+
+        let mut p = valid_params();
+        p.outcome_payouts
+            .insert(Outcome::Attestation(0), PayoutWeights::from([(2, 1)]));
+        assert!(matches!(p.validate(), Err(Error::OutOfBoundsPlayerIndex)));
+    }
+
+    #[test]
+    fn rejects_payout_weight_overflow() {
+        // Sum of weights overflows.
+        let mut p = valid_params();
+        p.outcome_payouts.insert(
+            Outcome::Attestation(1),
+            PayoutWeights::from([(0, u64::MAX), (1, 1)]),
+        );
+        assert!(matches!(p.validate(), Err(Error::PayoutWeightOverflow)));
+
+        // Sum fits, but funding_value * total_weight does not.
+        let mut p = valid_params();
+        p.outcome_payouts.insert(
+            Outcome::Attestation(1),
+            PayoutWeights::from([(0, u64::MAX / 2), (1, u64::MAX / 2)]),
+        );
+        assert!(matches!(p.validate(), Err(Error::PayoutWeightOverflow)));
+
+        // Large but safe weights are fine.
+        let mut p = valid_params();
+        p.outcome_payouts.insert(
+            Outcome::Attestation(1),
+            PayoutWeights::from([(0, 1 << 40), (1, 1 << 40)]),
+        );
+        p.validate().expect("2^41 * 100_000 sats fits in a u64");
+    }
+
+    #[test]
+    fn rejects_bad_fee_rate_funding_value_and_locktime() {
+        let mut p = valid_params();
+        p.fee_rate = FeeRate::ZERO;
+        assert!(matches!(p.validate(), Err(Error::InvalidFeeRate)));
+
+        let mut p = valid_params();
+        p.funding_value = Amount::ZERO;
+        assert!(matches!(p.validate(), Err(Error::InvalidFundingValue)));
+
+        let mut p = valid_params();
+        p.relative_locktime_block_delta = 0;
+        assert!(matches!(p.validate(), Err(Error::InvalidLocktime)));
+
+        let mut p = valid_params();
+        p.relative_locktime_block_delta = ContractParameters::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA;
+        p.validate().expect("maximum delta is allowed");
+        assert_eq!(p.reclaim_block_delay(), 0xFFFE);
+
+        p.relative_locktime_block_delta = ContractParameters::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA + 1;
+        assert!(matches!(p.validate(), Err(Error::InvalidLocktime)));
+    }
+
+    #[test]
+    fn reclaim_block_delay_never_wraps() {
+        let mut p = valid_params();
+        assert_eq!(p.reclaim_block_delay(), 288);
+        p.relative_locktime_block_delta = 40_000;
+        assert_eq!(p.reclaim_block_delay(), u16::MAX);
+        assert!(p.reclaim_block_delay() >= p.relative_locktime_block_delta);
     }
 }

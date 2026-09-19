@@ -1,6 +1,70 @@
-//! Crate documentation is TODO.
+//! Ticketed Discreet Log Contracts.
 //!
-//! See [the Github README](https://github.com/conduition/dlctix).
+//! A ticketed DLC lets a single *market maker* front the on-chain capital of a
+//! multi-party DLC, while *players* buy into the contract off-chain by purchasing
+//! *ticket preimages*. This crate builds every transaction of the contract,
+//! runs the MuSig2 signing rounds, validates the result, and produces the
+//! witnesses needed to enforce or cooperatively close the contract on-chain. It
+//! contains no networking, wallet, or Lightning code.
+//!
+//! See [the Github README](https://github.com/tee8z/dlctix) and
+//! [the design write-up](https://conduition.io/scriptless/ticketed-dlc/).
+//!
+//! # Overview
+//!
+//! 1. All parties agree on a [`ContractParameters`] and the market maker's funding
+//!    outpoint, and each independently builds a [`TicketedDLC`]. Construction runs
+//!    [`ContractParameters::validate`], which rejects unsafe parameters.
+//! 2. All parties sign every outcome and split transaction, either with the
+//!    in-process [`SigningSession`] state machine or with an external signer via
+//!    [`TicketedDLC::signing_data`] (see the [`signing`] module).
+//! 3. Once every party holds a verified [`SignedContract`], the market maker
+//!    broadcasts the funding transaction and sells ticket preimages to players.
+//! 4. After the oracle attests, the contract is enforced or closed with the
+//!    methods on [`SignedContract`].
+//!
+//! # Security considerations
+//!
+//! - **Validate parameters independently.** Recompute the oracle's locking points
+//!   from its announcement and check every field of the [`ContractParameters`] you
+//!   receive (your own [`Player`] entry, payouts, fee rate, locktime delta, funding
+//!   value). [`ContractParameters::validate`] rejects malformed parameters, but it
+//!   cannot know what you agreed to.
+//! - **Verify signatures before committing funds.** The market maker must verify
+//!   the complete signature set before broadcasting the funding transaction, and a
+//!   player must verify the signatures for every outcome they can win before buying
+//!   a ticket. [`SigningSession`] does this for you; the external signing flow must
+//!   call [`TicketedDLC::verify_signatures`] or [`TicketedDLC::into_signed_contract`].
+//!   The funding output is an n-of-n key with no timeout, so a contract funded with
+//!   an invalid signature set can only be recovered with every player's cooperation.
+//! - **Fixed fees, no fee bumping.** Every pre-signed transaction carries the fixed
+//!   [`fee_rate`][ContractParameters::fee_rate] and has no anchor output. No party can
+//!   fee-bump an outcome or split transaction unilaterally, and the split transaction
+//!   must confirm between `delta` and `2 * delta` blocks after the outcome
+//!   transaction, or the market maker can reclaim the funds. Choose a conservative fee
+//!   rate and [`relative_locktime_block_delta`][ContractParameters::relative_locktime_block_delta],
+//!   and consider signing several contracts at different fee rates.
+//! - **Expiry.** With [`expiry: None`][EventLockingConditions::expiry] there is no
+//!   expiry transaction. If the oracle never attests, the market maker's capital
+//!   stays locked until every player cooperates in a funding-close transaction.
+//! - **Watch the chain.** Ticket holders must broadcast the split transaction and
+//!   their win transaction inside the `delta`-block windows, or the market maker's
+//!   reclaim paths mature.
+//! - **Authenticate your peers.** Signers are identified only by public key. The
+//!   application must authenticate the network peer behind each key, otherwise a
+//!   malicious peer could submit nonces or partial signatures under another signer's
+//!   key and stall the session.
+//! - **Untrusted input.** Deserializing a [`TicketedDLC`] or [`SignedContract`]
+//!   rebuilds every transaction. Bound the number of players and outcomes before
+//!   deserializing data from an untrusted source.
+//! - **Secret handling.** Neither this crate nor the `secp`, `musig2`, or
+//!   `secp256k1` crates zeroize secret keys, nonces, or preimages on drop. Manage
+//!   secret lifetimes in your application if that matters to your threat model.
+//! - **Preimages are one-time secrets.** Ticket and payout preimages must be unique
+//!   per player. Revealing one preimage must never unlock a spending path guarded by
+//!   another, which is why [`ContractParameters::validate`] requires distinct ticket
+//!   hashes, distinct payout hashes, and no overlap between the two sets.
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 #[cfg(test)]
@@ -25,7 +89,7 @@ use contract::{
     outcome::{OutcomeSignatures, OutcomeTransactionBuildOutput},
     split::SplitTransactionBuildOutput,
 };
-use errors::Error;
+pub use errors::Error;
 use hashlock::{sha256, Preimage};
 
 use bitcoin::hashes::Hash as _;
@@ -359,7 +423,7 @@ impl SigningSession<NonceSharingRound> {
             .ok_or(Error::InvalidKey)?;
 
         let our_secret_nonces =
-            base_sigmap.map_values(|_| SecNonce::build(&mut rng).with_seckey(signing_key).build());
+            base_sigmap.map_values(|_| SecNonce::build_with_seckey(&mut rng, signing_key).build());
 
         let our_public_nonces = our_secret_nonces
             .by_ref()
@@ -945,7 +1009,7 @@ impl SignedContract {
         contract::outcome::outcome_tx_prevout(
             &self.dlc.outcome_tx_build,
             outcome,
-            2 * self.dlc.params.relative_locktime_block_delta,
+            self.dlc.params.reclaim_block_delay(),
         )
     }
 
@@ -987,7 +1051,7 @@ impl SignedContract {
             &self.dlc.params,
             &self.dlc.split_tx_build,
             win_cond,
-            2 * self.dlc.params.relative_locktime_block_delta,
+            self.dlc.params.reclaim_block_delay(),
         )
     }
 
@@ -1038,7 +1102,7 @@ impl SignedContract {
             .split_spend_infos()
             .values()
             .next()
-            .unwrap()
+            .expect("validated contract has at least one outcome with at least one winner")
             .input_weight_for_win_tx()
     }
 
@@ -1055,7 +1119,7 @@ impl SignedContract {
             .split_spend_infos()
             .values()
             .next()
-            .unwrap()
+            .expect("validated contract has at least one outcome with at least one winner")
             .input_weight_for_reclaim_tx()
     }
 
@@ -1071,7 +1135,7 @@ impl SignedContract {
             .split_spend_infos()
             .values()
             .next()
-            .unwrap()
+            .expect("validated contract has at least one outcome with at least one winner")
             .input_weight_for_sellback_tx()
     }
 

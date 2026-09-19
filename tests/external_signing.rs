@@ -93,7 +93,7 @@ fn fixture() -> Fixture {
             expiry: Some(500_000),
         },
         outcome_payouts,
-        fee_rate: FeeRate::from_sat_per_vb_unchecked(50),
+        fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: Amount::from_sat(400_000),
         relative_locktime_block_delta: 72,
     };

@@ -66,7 +66,9 @@ pub(crate) fn build_split_txs(
         let (outcome_input, _) = contract::outcome::outcome_tx_prevout(
             outcome_build_output,
             &outcome,
-            params.relative_locktime_block_delta, // Split TXs have 1*delta block delay
+            // The split spending leaf has no OP_CSV, so this sequence is inert;
+            // the split TX may confirm as soon as the outcome TX does.
+            params.relative_locktime_block_delta,
         )?;
 
         // payout_values is a btree, so outputs are automatically sorted by player.

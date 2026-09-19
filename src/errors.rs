@@ -45,6 +45,9 @@ pub enum Error {
     InvalidLockingPoint,
     /// An outcome is not covered by the event's locking points or expiry.
     UnknownOutcome,
+    /// The event expiry is zero, which would make the expiry transaction
+    /// spendable as soon as the funding transaction confirms.
+    InvalidExpiry,
     /// The contract has no outcomes at all.
     EmptyOutcomePayouts,
     /// A payout map contains no winners.
@@ -131,6 +134,7 @@ impl fmt::Display for Error {
             InvalidFundingValue => write!(f, "invalid funding value"),
             InvalidLockingPoint => write!(f, "oracle locking point is the point at infinity"),
             UnknownOutcome => write!(f, "unknown outcome"),
+            InvalidExpiry => write!(f, "event expiry is zero or immediately spendable"),
             EmptyOutcomePayouts => write!(f, "contract has no outcomes"),
             EmptyPayoutMap => write!(f, "empty payout map"),
 

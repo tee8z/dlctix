@@ -148,7 +148,16 @@ impl ContractParameters {
     ///   transaction spendable without any attestation;
     /// - payout weights so large that payout amounts would overflow;
     /// - a zero fee rate, a zero funding value, or a locktime delta outside
-    ///   `1..=MAX_RELATIVE_LOCKTIME_BLOCK_DELTA`.
+    ///   `1..=MAX_RELATIVE_LOCKTIME_BLOCK_DELTA`;
+    /// - an expiry of zero, which would make the expiry transaction spendable
+    ///   as soon as the funding transaction confirms.
+    ///
+    /// Note this cannot check whether a non-zero expiry is still in the future:
+    /// the expiry transaction carries a plain (non-adaptor) signature, so once the
+    /// expiry height or time has passed, anyone holding the signed contract can
+    /// resolve the contract to the [`Outcome::Expiry`] payout map without any
+    /// oracle attestation. Integrators must confirm the expiry is far enough in
+    /// the future before agreeing to the parameters.
     pub fn validate(&self) -> Result<(), Error> {
         // A contract with no outcomes can never be resolved except cooperatively.
         if self.outcome_payouts.is_empty() {
@@ -237,6 +246,12 @@ impl ContractParameters {
             || self.relative_locktime_block_delta > Self::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA
         {
             return Err(Error::InvalidLocktime);
+        }
+
+        // An expiry of zero would make the expiry transaction spendable
+        // immediately after the funding transaction confirms.
+        if self.event.expiry == Some(0) {
+            return Err(Error::InvalidExpiry);
         }
 
         // Must be funded by some fixed non-zero amount.
@@ -702,6 +717,19 @@ mod tests {
 
         p.relative_locktime_block_delta = ContractParameters::MAX_RELATIVE_LOCKTIME_BLOCK_DELTA + 1;
         assert!(matches!(p.validate(), Err(Error::InvalidLocktime)));
+    }
+
+    #[test]
+    fn rejects_zero_expiry() {
+        let mut p = valid_params();
+        p.event.expiry = Some(0);
+        assert!(matches!(p.validate(), Err(Error::InvalidExpiry)));
+
+        // No expiry at all is fine: there is simply no expiry transaction.
+        let mut p = valid_params();
+        p.event.expiry = None;
+        p.outcome_payouts.remove(&Outcome::Expiry);
+        p.validate().expect("missing expiry is allowed");
     }
 
     #[test]

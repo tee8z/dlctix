@@ -39,17 +39,24 @@
 //!   an invalid signature set can only be recovered with every player's cooperation.
 //! - **Fixed fees, no fee bumping.** Every pre-signed transaction carries the fixed
 //!   [`fee_rate`][ContractParameters::fee_rate] and has no anchor output. No party can
-//!   fee-bump an outcome or split transaction unilaterally, and the split transaction
-//!   must confirm between `delta` and `2 * delta` blocks after the outcome
+//!   fee-bump an outcome or split transaction unilaterally. The split transaction
+//!   spending path has no relative locktime of its own, so it can confirm as early
+//!   as the same block as the outcome transaction, but it must confirm before the
+//!   market maker's reclaim path matures `2 * delta` blocks after the outcome
 //!   transaction, or the market maker can reclaim the funds. Choose a conservative fee
 //!   rate and [`relative_locktime_block_delta`][ContractParameters::relative_locktime_block_delta],
 //!   and consider signing several contracts at different fee rates.
 //! - **Expiry.** With [`expiry: None`][EventLockingConditions::expiry] there is no
 //!   expiry transaction. If the oracle never attests, the market maker's capital
 //!   stays locked until every player cooperates in a funding-close transaction.
-//! - **Watch the chain.** Ticket holders must broadcast the split transaction and
-//!   their win transaction inside the `delta`-block windows, or the market maker's
-//!   reclaim paths mature.
+//!   Conversely, the expiry transaction is signed with a plain signature, so an
+//!   expiry which has already passed lets anyone resolve the contract to the
+//!   expiry payout map without an attestation; check the expiry is in the future
+//!   before agreeing to the parameters.
+//! - **Watch the chain.** Ticket holders must broadcast the split transaction before
+//!   the outcome transaction's `2 * delta`-block reclaim matures, and their win
+//!   transaction within `delta` blocks after the split transaction confirms, or the
+//!   market maker's reclaim paths mature.
 //! - **Authenticate your peers.** Signers are identified only by public key. The
 //!   application must authenticate the network peer behind each key, otherwise a
 //!   malicious peer could submit nonces or partial signatures under another signer's
@@ -284,6 +291,10 @@ impl TicketedDLC {
     /// valid signature. If `our_pubkey` is the market maker's key, every signature
     /// in the contract is verified. Returns an error if any relevant signature is
     /// missing or invalid, or if `our_pubkey` does not belong to the contract.
+    ///
+    /// Note the verification set is empty for a player who wins nothing in any
+    /// outcome, so `Ok(())` for such a key does not prove the rest of the contract
+    /// is fully signed. Only the market maker's verification covers every signature.
     ///
     /// Use this on signatures produced outside a [`SigningSession`], for example by
     /// an HSM using [`TicketedDLC::signing_data`], before funding the contract or

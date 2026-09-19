@@ -60,15 +60,33 @@ where
 {
     let fee_total = fee_calc_safe(fee_rate, input_weights, output_spk_lens)?;
 
+    let n_outputs = u64::try_from(payout_map.len()).map_err(|_| Error::PayoutWeightOverflow)?;
+    if n_outputs == 0 {
+        return Err(Error::EmptyPayoutMap);
+    }
+
     // Mining fees are distributed equally among all winners, regardless of payout weight.
-    let fee_shared = fee_total / payout_map.len() as u64;
-    let total_weight: u64 = payout_map.values().copied().sum();
+    let fee_shared = fee_total / n_outputs;
+
+    // All arithmetic is checked: the payout map may originate from untrusted
+    // parameters, and an overflow must surface as an error rather than a panic
+    // or a silently wrong payout.
+    let total_weight = payout_map
+        .values()
+        .try_fold(0u64, |acc, &weight| acc.checked_add(weight))
+        .ok_or(Error::PayoutWeightOverflow)?;
+    if total_weight == 0 {
+        return Err(Error::InvalidPayoutWeight);
+    }
 
     // Payout amounts are computed by using relative weights.
     payout_map
         .iter()
         .map(|(&key, &weight)| {
-            let payout = available_coins * weight / total_weight;
+            let payout = available_coins
+                .checked_mul(weight)
+                .ok_or(Error::PayoutWeightOverflow)?
+                / total_weight;
             let payout_value = fee_subtract_safe(payout, fee_shared, dust_threshold)?;
             Ok((key, payout_value))
         })

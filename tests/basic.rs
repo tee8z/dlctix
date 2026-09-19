@@ -136,7 +136,7 @@ fn two_player_example() -> Result<(), Box<dyn std::error::Error>> {
         // Ideally it should be high enough to cover unexpected surges in the fee market,
         // Callers may also wish to consider signing multiple sets of Ticketed DLC transactions
         // under different fee rates.
-        fee_rate: bitcoin::FeeRate::from_sat_per_vb_unchecked(100),
+        fee_rate: bitcoin::FeeRate::from_sat_per_vb_u32(100),
 
         // This determines the amount of bitcoin which the market maker is expected to use
         // to fund the contract on-chain. Normally, this would be the expected sum of the
@@ -558,7 +558,7 @@ fn simple_sweep_tx(
             value: {
                 let tx_weight =
                     bitcoin::transaction::predict_weight([input_weight], [script_pubkey.len()]);
-                let fee = tx_weight * bitcoin::FeeRate::from_sat_per_vb_unchecked(20);
+                let fee = tx_weight * bitcoin::FeeRate::from_sat_per_vb_u32(20);
                 prevout_value - fee
             },
             script_pubkey,

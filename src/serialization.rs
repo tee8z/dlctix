@@ -190,7 +190,9 @@ mod tests {
              \"payout_hash\":\"1414141414141414141414141414141414141414141414141414141414141414\"}",
         );
 
-        let cbor_serialized_hex: String = serde_cbor::to_vec(&player).unwrap().encode_hex();
+        let mut cbor_serialized = Vec::new();
+        ciborium::into_writer(&player, &mut cbor_serialized).unwrap();
+        let cbor_serialized_hex: String = cbor_serialized.encode_hex();
         assert_eq!(
             &cbor_serialized_hex,
             "a3667075626b6579582103a0434d9e47f3c86235477c7b1ae6ae5d3442d49b1943c2b752a68e\
@@ -240,7 +242,7 @@ mod tests {
                 ),
                 (Outcome::Expiry, PayoutWeights::from([(0, 1), (1, 1)])),
             ]),
-            fee_rate: FeeRate::from_sat_per_vb_unchecked(100),
+            fee_rate: FeeRate::from_sat_per_vb_u32(100),
             funding_value: Amount::from_sat(300_000),
             relative_locktime_block_delta: 25,
         };

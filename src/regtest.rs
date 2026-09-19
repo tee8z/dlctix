@@ -16,7 +16,7 @@ use secp::{MaybePoint, MaybeScalar, Point, Scalar};
 
 use bitcoincore_rpc::{jsonrpc::serde_json, Auth, Client as BitcoinClient, RpcApi};
 use once_cell::sync::Lazy;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use std::{
     collections::BTreeMap,
@@ -53,7 +53,7 @@ fn simple_sweep_tx(
         output: vec![TxOut {
             value: {
                 let tx_weight = predict_weight([input_weight], [script_pubkey.len()]);
-                let fee = tx_weight * FeeRate::from_sat_per_vb_unchecked(20);
+                let fee = tx_weight * FeeRate::from_sat_per_vb_u32(20);
                 prevout_value - fee
             },
             script_pubkey,
@@ -76,7 +76,10 @@ struct BitcoindSubprocessHandle {
 }
 
 fn run_bitcoind() -> Option<(BitcoindSubprocessHandle, BitcoinClient)> {
-    let dir = TempDir::new("dlctix").expect("error making tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("dlctix")
+        .tempdir()
+        .expect("error making tempdir");
 
     let rpc_port: u16 = rand::rng().random_range(20000..u16::MAX);
     let p2p_port: u16 = rpc_port + 1;
@@ -123,7 +126,8 @@ static REMOTE_NODE_SINGLETON: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 /// - `BITCOIND_RPC_AUTH_USERNAME`
 /// - `BITCOIND_RPC_AUTH_PASSWORD`
 fn new_rpc_client() -> (Option<BitcoindSubprocessHandle>, BitcoinClient) {
-    dotenv::dotenv().unwrap();
+    // Load optional overrides from a `.env` file; a missing file is fine.
+    let _ = dotenvy::dotenv();
 
     match run_bitcoind() {
         Some((subproc_handle, rpc_client)) => {
@@ -510,7 +514,7 @@ impl SimulationManager {
                 expiry: u32::try_from(initial_block_height + 100).ok(),
             },
             outcome_payouts,
-            fee_rate: FeeRate::from_sat_per_vb_unchecked(50),
+            fee_rate: FeeRate::from_sat_per_vb_u32(50),
             funding_value: FUNDING_VALUE,
             relative_locktime_block_delta: 25,
         };
@@ -1365,7 +1369,7 @@ fn stress_test() {
             expiry: None,
         },
         outcome_payouts,
-        fee_rate: FeeRate::from_sat_per_vb_unchecked(50),
+        fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: FUNDING_VALUE,
         relative_locktime_block_delta: 25,
     };

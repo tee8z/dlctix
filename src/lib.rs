@@ -422,7 +422,7 @@ impl SigningSession<NonceSharingRound> {
             .ok_or(Error::InvalidKey)?;
 
         let our_secret_nonces =
-            base_sigmap.map_values(|_| SecNonce::build(&mut rng).with_seckey(signing_key).build());
+            base_sigmap.map_values(|_| SecNonce::build_with_seckey(&mut rng, signing_key).build());
 
         let our_public_nonces = our_secret_nonces
             .by_ref()

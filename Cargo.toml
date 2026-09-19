@@ -1,8 +1,8 @@
 [package]
 name = "dlctix"
-version = "0.0.9"
+version = "0.1.0"
 edition = "2021"
-authors = ["conduition <conduition@proton.me>"]
+authors = ["tee8z <tee8z@protonmail.com>", "conduition <conduition@proton.me>"]
 description = "Ticketed Discreet Log Contracts"
 readme = "README.md"
 license = "Unlicense"

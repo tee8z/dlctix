@@ -180,7 +180,15 @@ impl ContractParameters {
     /// - an expiry of zero, which would make the expiry transaction spendable
     ///   as soon as the funding transaction confirms;
     /// - an anchor value below the P2A dust limit of
-    ///   [`P2A_DUST_VALUE`][crate::anchor::P2A_DUST_VALUE].
+    ///   [`P2A_DUST_VALUE`][crate::anchor::P2A_DUST_VALUE];
+    /// - with `outcome_bound_splits` unset, two attestation outcomes which pay the
+    ///   same winners different weights
+    ///   ([`UnboundSharedWinners`][Error::UnboundSharedWinners]).
+    ///
+    /// Deserializing a [`TicketedDLC`][crate::TicketedDLC] or
+    /// [`SignedContract`][crate::SignedContract] runs every check except the last,
+    /// so contracts signed with dlctix 0.1.0 still load and can be enforced. Call
+    /// `validate` yourself on parameters you have not yet agreed to.
     ///
     /// Note this cannot check whether a non-zero expiry is still in the future:
     /// the expiry transaction carries a plain (non-adaptor) signature, so once the
@@ -189,6 +197,13 @@ impl ContractParameters {
     /// oracle attestation. Integrators must confirm the expiry is far enough in
     /// the future before agreeing to the parameters.
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_stored()?;
+        self.check_bound_splits()
+    }
+
+    /// Every check of [`validate`][Self::validate] except the shared-winners
+    /// rule, which 0.1.0 contracts predate. Used when rebuilding a stored contract.
+    pub(crate) fn validate_stored(&self) -> Result<(), Error> {
         // A contract with no outcomes can never be resolved except cooperatively.
         if self.outcome_payouts.is_empty() {
             return Err(Error::EmptyOutcomePayouts);
@@ -296,6 +311,10 @@ impl ContractParameters {
             }
         }
 
+        Ok(())
+    }
+
+    fn check_bound_splits(&self) -> Result<(), Error> {
         // Unless splits are bound to their outcome, attestation outcomes with the
         // same winners share one outcome transaction, so each split signed for one
         // of them also spends the others' outcome output. That is only harmless

@@ -177,10 +177,14 @@ impl TicketedDLC {
         Self::build(params, funding_outpoint)
     }
 
-    /// Rebuild a stored contract. This skips the shared-winners rule of
-    /// [`ContractParameters::validate`], so contracts signed with dlctix 0.1.0
-    /// still load.
-    pub(crate) fn rebuild(
+    /// Rebuild a contract from stored parameters, for example to verify or
+    /// enforce a contract that was already agreed and signed.
+    ///
+    /// This runs every check of [`ContractParameters::validate`] except the
+    /// [`UnboundSharedWinners`][Error::UnboundSharedWinners] rule, so contracts
+    /// signed with dlctix 0.1.0 still rebuild, with the same transactions. Use
+    /// [`TicketedDLC::new`] for parameters that have not been agreed yet.
+    pub fn rebuild(
         params: ContractParameters,
         funding_outpoint: OutPoint,
     ) -> Result<TicketedDLC, Error> {

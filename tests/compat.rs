@@ -270,10 +270,17 @@ fn v010_shared_winner_contract_still_loads() {
     let stored = serde_json::to_string(&old).unwrap();
 
     let params: ContractParameters = serde_json::from_str(&json).unwrap();
+    let params_for_rebuild = params.clone();
     assert!(matches!(
         TicketedDLC::new(params, funding_outpoint()),
         Err(dlctix::Error::UnboundSharedWinners)
     ));
+
+    let rebuilt = TicketedDLC::rebuild(params_for_rebuild, funding_outpoint()).expect("rebuild");
+    assert_eq!(
+        txs_by_name(old.unsigned_outcome_txs()),
+        txs_by_name(rebuilt.unsigned_outcome_txs())
+    );
 
     let new: TicketedDLC = serde_json::from_str(&stored).expect("0.1.0 TicketedDLC");
     assert_eq!(serde_json::to_string(&new).unwrap(), stored);

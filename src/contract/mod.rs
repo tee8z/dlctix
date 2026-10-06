@@ -7,6 +7,7 @@ use secp::{MaybePoint, Point};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    anchor::{AnchorParams, P2A_DUST_VALUE, P2A_SCRIPT_PUBKEY_SIZE},
     consts::{P2TR_DUST_VALUE, P2TR_SCRIPT_PUBKEY_SIZE},
     errors::Error,
     oracles::EventLockingConditions,
@@ -98,6 +99,17 @@ pub struct ContractParameters {
     /// - `432`: ~72 hours
     /// - `1008`: ~1 week
     pub relative_locktime_block_delta: u16,
+
+    /// An optional pay-to-anchor output appended to every outcome, expiry, and
+    /// split transaction, so that anyone can fee-bump them with CPFP. See the
+    /// [`anchor`][crate::anchor] module.
+    ///
+    /// Defaults to `None`, which builds exactly the transactions of dlctix 0.1.0.
+    /// The field is omitted from the serialized parameters when `None`, so
+    /// parameters serialized by older versions deserialize unchanged and
+    /// re-serialize to the same bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<AnchorParams>,
 }
 
 /// Represents one possible outcome branch of the DLC. This includes both
@@ -150,7 +162,9 @@ impl ContractParameters {
     /// - a zero fee rate, a zero funding value, or a locktime delta outside
     ///   `1..=MAX_RELATIVE_LOCKTIME_BLOCK_DELTA`;
     /// - an expiry of zero, which would make the expiry transaction spendable
-    ///   as soon as the funding transaction confirms.
+    ///   as soon as the funding transaction confirms;
+    /// - an anchor value below the P2A dust limit of
+    ///   [`P2A_DUST_VALUE`][crate::anchor::P2A_DUST_VALUE].
     ///
     /// Note this cannot check whether a non-zero expiry is still in the future:
     /// the expiry transaction carries a plain (non-adaptor) signature, so once the
@@ -259,6 +273,13 @@ impl ContractParameters {
             return Err(Error::InvalidFundingValue);
         }
 
+        // A dust anchor would make every anchored transaction non-standard.
+        if let Some(anchor) = self.anchor {
+            if anchor.value < P2A_DUST_VALUE {
+                return Err(Error::InvalidAnchorValue);
+            }
+        }
+
         Ok(())
     }
 
@@ -283,10 +304,34 @@ impl ContractParameters {
         Ok(spend_info.funding_output())
     }
 
-    pub(crate) fn outcome_output_value(&self) -> Result<Amount, Error> {
+    /// Returns the anchor output appended to every outcome, expiry, and split
+    /// transaction, or `None` if the contract has no anchors.
+    pub fn anchor_output(&self) -> Option<TxOut> {
+        self.anchor.map(|anchor| anchor.output())
+    }
+
+    /// The value of each anchor output, or zero if the contract has no anchors.
+    pub(crate) fn anchor_value(&self) -> Amount {
+        self.anchor
+            .map(|anchor| anchor.value)
+            .unwrap_or(Amount::ZERO)
+    }
+
+    /// Script pubkey lengths of the anchor output, if any, for fee estimation.
+    pub(crate) fn anchor_spk_lens(&self) -> impl Iterator<Item = usize> {
+        self.anchor.map(|_| P2A_SCRIPT_PUBKEY_SIZE).into_iter()
+    }
+
+    /// The value of the single contract output of every outcome and expiry
+    /// transaction: the funding value minus the mining fee and the anchor value.
+    pub fn outcome_output_value(&self) -> Result<Amount, Error> {
         let input_weights = [InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH];
-        let fee = fees::fee_calc_safe(self.fee_rate, input_weights, [P2TR_SCRIPT_PUBKEY_SIZE])?;
-        let outcome_value = fees::fee_subtract_safe(self.funding_value, fee, P2TR_DUST_VALUE)?;
+        let spk_lens = std::iter::once(P2TR_SCRIPT_PUBKEY_SIZE).chain(self.anchor_spk_lens());
+        let fee = fees::fee_calc_safe(self.fee_rate, input_weights, spk_lens)?;
+        let spent = fee
+            .checked_add(self.anchor_value())
+            .ok_or(Error::InvalidFeeAmount)?;
+        let outcome_value = fees::fee_subtract_safe(self.funding_value, spent, P2TR_DUST_VALUE)?;
         Ok(outcome_value)
     }
 
@@ -576,6 +621,7 @@ mod tests {
             fee_rate: FeeRate::from_sat_per_vb_u32(10),
             funding_value: Amount::from_sat(100_000),
             relative_locktime_block_delta: 144,
+            anchor: None,
         }
     }
 
@@ -730,6 +776,34 @@ mod tests {
         p.event.expiry = None;
         p.outcome_payouts.remove(&Outcome::Expiry);
         p.validate().expect("missing expiry is allowed");
+    }
+
+    #[test]
+    fn rejects_dust_anchor() {
+        let mut p = valid_params();
+        p.anchor = Some(AnchorParams {
+            value: P2A_DUST_VALUE - Amount::ONE_SAT,
+        });
+        assert!(matches!(p.validate(), Err(Error::InvalidAnchorValue)));
+
+        p.anchor = Some(AnchorParams::default());
+        p.validate().expect("dust-limit anchor is allowed");
+    }
+
+    #[test]
+    fn anchor_reduces_outcome_value() {
+        let mut p = valid_params();
+        let plain = p.outcome_output_value().unwrap();
+        assert!(p.anchor_output().is_none());
+
+        p.anchor = Some(AnchorParams::default());
+        let anchored = p.outcome_output_value().unwrap();
+        let anchor_output = p.anchor_output().unwrap();
+
+        // The anchored transaction pays for the anchor value plus the anchor
+        // output's weight at the contract fee rate.
+        let extra_fee = p.fee_rate.fee_wu(anchor_output.weight()).unwrap();
+        assert_eq!(plain - anchored, anchor_output.value + extra_fee);
     }
 
     #[test]

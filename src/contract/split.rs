@@ -51,11 +51,18 @@ pub(crate) fn build_split_txs(
             .get(&outcome)
             .ok_or(Error::UnknownOutcome)?;
 
-        // Fee estimation
+        // Fee estimation. The anchor value, if any, is shared among the winners
+        // in the same way as the mining fee.
         let input_weight = outcome_spend_info.input_weight_for_split_tx();
-        let spk_lengths = std::iter::repeat(P2TR_SCRIPT_PUBKEY_SIZE).take(payout_map.len());
+        let spk_lengths = std::iter::repeat(P2TR_SCRIPT_PUBKEY_SIZE)
+            .take(payout_map.len())
+            .chain(params.anchor_spk_lens());
+        let available_value = outcome_spend_info
+            .outcome_value()
+            .checked_sub(params.anchor_value())
+            .ok_or(Error::InsufficientFunds)?;
         let payout_values: BTreeMap<PlayerIndex, Amount> = fees::fee_calc_shared(
-            outcome_spend_info.outcome_value(),
+            available_value,
             params.fee_rate,
             [input_weight],
             spk_lengths,
@@ -66,8 +73,9 @@ pub(crate) fn build_split_txs(
         let (outcome_input, _) = contract::outcome::outcome_tx_prevout(
             outcome_build_output,
             &outcome,
-            // The split spending leaf has no OP_CSV, so this sequence is inert;
-            // the split TX may confirm as soon as the outcome TX does.
+            // The split spending leaf has no OP_CSV, but BIP-68 still enforces
+            // this sequence: the split TX confirms `delta` blocks after the
+            // outcome TX at the earliest.
             params.relative_locktime_block_delta,
         )?;
 
@@ -95,6 +103,10 @@ pub(crate) fn build_split_txs(
             };
             split_spend_infos.insert(win_cond, split_spend_info);
         }
+
+        // The anchor, if any, is always the last output, so player outputs keep
+        // their indexes.
+        split_tx_outputs.extend(params.anchor_output());
 
         let split_tx = Transaction {
             version: bitcoin::transaction::Version::TWO,

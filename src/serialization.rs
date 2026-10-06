@@ -245,6 +245,7 @@ mod tests {
             fee_rate: FeeRate::from_sat_per_vb_u32(100),
             funding_value: Amount::from_sat(300_000),
             relative_locktime_block_delta: 25,
+            anchor: None,
         };
 
         let json_serialized =
@@ -299,5 +300,16 @@ mod tests {
         let decoded_params: ContractParameters = serde_json::from_str(&json_serialized)
             .expect("failed to deserialize ContractParameters");
         assert_eq!(decoded_params, params);
+
+        // An anchor is serialized after the other fields, and only when present.
+        let anchored = ContractParameters {
+            anchor: Some(crate::AnchorParams::default()),
+            ..params
+        };
+        let json_anchored = serde_json::to_string(&anchored).unwrap();
+        assert!(json_anchored
+            .ends_with(r#""relative_locktime_block_delta":25,"anchor":{"value":240}}"#));
+        let decoded_anchored: ContractParameters = serde_json::from_str(&json_anchored).unwrap();
+        assert_eq!(decoded_anchored, anchored);
     }
 }

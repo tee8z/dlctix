@@ -474,7 +474,12 @@ struct SimulationManager {
 }
 
 impl SimulationManager {
+    /// Set up a signed and funded contract with anchor outputs.
     fn new() -> Self {
+        Self::with_anchor(Some(AnchorParams::default()))
+    }
+
+    fn with_anchor(anchor: Option<AnchorParams>) -> Self {
         let mut rng = rand::rng();
 
         // Oracle
@@ -563,6 +568,7 @@ impl SimulationManager {
             fee_rate: FeeRate::from_sat_per_vb_u32(50),
             funding_value: FUNDING_VALUE,
             relative_locktime_block_delta: 25,
+            anchor,
         };
 
         // Prepare a funding transaction
@@ -666,8 +672,15 @@ impl std::ops::Drop for SimulationManager {
 
 #[test]
 fn with_on_chain_resolutions() {
-    let manager = SimulationManager::new();
+    on_chain_resolutions(SimulationManager::new());
+}
 
+#[test]
+fn with_on_chain_resolutions_without_anchors() {
+    on_chain_resolutions(SimulationManager::with_anchor(None));
+}
+
+fn on_chain_resolutions(manager: SimulationManager) {
     // The oracle attests to outcome zero, where Alice, Bob, and Carol are winners.
     let outcome_index: usize = 0;
     let oracle_attestation = manager.oracle_attestation(outcome_index).unwrap();
@@ -1379,6 +1392,7 @@ fn stress_test() {
         fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: FUNDING_VALUE,
         relative_locktime_block_delta: 25,
+        anchor: Some(AnchorParams::default()),
     };
 
     let funding_outpoint = OutPoint {
@@ -1396,4 +1410,190 @@ fn stress_test() {
         .map(|p| p.seckey)
         .chain([market_maker_seckey]);
     let _ = musig_sign_ticketed_dlc(&ticketed_dlc, seckeys, &mut rng, false);
+}
+
+/// Build, sign and broadcast a CPFP child for `parent`, funded by a coin owned by
+/// `funding_seckey`. Returns the child.
+fn broadcast_cpfp_child(
+    manager: &SimulationManager,
+    parent: &Transaction,
+    funding_seckey: Scalar,
+    funding: (OutPoint, TxOut),
+    package_fee_rate: FeeRate,
+) -> Transaction {
+    let (funding_outpoint, funding_prevout) = funding;
+    let (_, anchor_prevout) = anchor::find_anchor(parent).expect("parent has an anchor");
+    let anchor_prevout = anchor_prevout.clone();
+
+    let mut child = manager
+        .contract
+        .cpfp_child_template(
+            parent,
+            &[CpfpFundingInput {
+                outpoint: funding_outpoint,
+                prevout: funding_prevout.clone(),
+                weight: InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH,
+            }],
+            p2tr_script_pubkey(funding_seckey.base_point_mul()),
+            package_fee_rate,
+        )
+        .expect("failed to build CPFP child");
+
+    // The anchor input needs no witness; only the funding input is signed.
+    let sighash = SighashCache::new(&child)
+        .taproot_key_spend_signature_hash(
+            1,
+            &Prevouts::All(&[anchor_prevout, funding_prevout]),
+            TapSighashType::Default,
+        )
+        .unwrap();
+    let signature: CompactSignature = musig2::deterministic::sign_solo(funding_seckey, &sighash);
+    child.input[1].witness.push(signature.serialize());
+
+    manager
+        .rpc
+        .send_raw_transaction(&child)
+        .expect("failed to broadcast CPFP child");
+    child
+}
+
+/// Assert that `parent` and its CPFP child sit in the mempool together and pay at
+/// least `package_fee_rate` as a package.
+fn assert_package_fee_rate(
+    manager: &SimulationManager,
+    parent: &Transaction,
+    package_fee_rate: FeeRate,
+) {
+    let entry: serde_json::Value = manager
+        .rpc
+        .call(
+            "getmempoolentry",
+            &[serde_json::Value::String(parent.compute_txid().to_string())],
+        )
+        .expect("parent in mempool");
+    assert_eq!(entry["descendantcount"].as_u64(), Some(2), "{entry}");
+    let descendant_fees = Amount::from_btc(entry["fees"]["descendant"].as_f64().unwrap()).unwrap();
+    let descendant_vsize = entry["descendantsize"].as_u64().unwrap();
+    assert!(
+        descendant_fees >= package_fee_rate.fee_vb(descendant_vsize).unwrap(),
+        "package pays {descendant_fees} for {descendant_vsize} vB: {entry}"
+    );
+}
+
+/// Assert that the given transaction output exists in the UTXO set and is confirmed.
+fn assert_confirmed(manager: &SimulationManager, outpoint: OutPoint) {
+    let txout: serde_json::Value = manager
+        .rpc
+        .call(
+            "gettxout",
+            &[
+                serde_json::Value::String(outpoint.txid.to_string()),
+                serde_json::Value::Number(outpoint.vout.into()),
+                serde_json::Value::Bool(false),
+            ],
+        )
+        .expect("gettxout");
+    assert!(
+        txout["confirmations"].as_u64().unwrap_or(0) >= 1,
+        "{outpoint} not confirmed: {txout}"
+    );
+}
+
+#[test]
+fn cpfp_outcome_and_split_tx_via_anchor() {
+    let manager = SimulationManager::new();
+    let package_fee_rate = FeeRate::from_sat_per_vb_u32(200);
+
+    // Someone with no stake in the contract funds the bumps from their own coins.
+    let bumper_seckey = Scalar::random(&mut rand::rng());
+    let bumper_address = p2tr_address(bumper_seckey.base_point_mul());
+    let funding_a = take_usable_utxo(&manager.rpc, &bumper_address, Amount::from_sat(100_000));
+    let funding_b = take_usable_utxo(&manager.rpc, &bumper_address, Amount::from_sat(100_000));
+    mine_blocks(&manager.rpc, 1).unwrap();
+
+    // The outcome TX is broadcast at the contract's fee rate, then bumped.
+    let outcome_index = 0;
+    let outcome_tx = manager
+        .contract
+        .signed_outcome_tx(
+            outcome_index,
+            manager.oracle_attestation(outcome_index).unwrap(),
+        )
+        .expect("failed to sign outcome TX");
+    manager
+        .rpc
+        .send_raw_transaction(&outcome_tx)
+        .expect("failed to broadcast outcome TX");
+
+    let outcome_child = broadcast_cpfp_child(
+        &manager,
+        &outcome_tx,
+        bumper_seckey,
+        funding_a,
+        package_fee_rate,
+    );
+    assert_package_fee_rate(&manager, &outcome_tx, package_fee_rate);
+
+    mine_blocks(&manager.rpc, 1).unwrap();
+    assert_confirmed(&manager, OutPoint::new(outcome_tx.compute_txid(), 0));
+    assert_confirmed(&manager, OutPoint::new(outcome_child.compute_txid(), 0));
+
+    // The split TX can be bumped the same way once its relative locktime passes.
+    let alice_win_cond = WinCondition {
+        outcome: Outcome::Attestation(outcome_index),
+        player_index: manager.alice.index,
+    };
+    let split_tx = manager
+        .contract
+        .signed_split_tx(&alice_win_cond, manager.alice.ticket_preimage)
+        .expect("failed to sign split TX");
+    manager.mine_delta_blocks().unwrap();
+    manager
+        .rpc
+        .send_raw_transaction(&split_tx)
+        .expect("failed to broadcast split TX");
+
+    let split_child = broadcast_cpfp_child(
+        &manager,
+        &split_tx,
+        bumper_seckey,
+        funding_b,
+        package_fee_rate,
+    );
+    assert_package_fee_rate(&manager, &split_tx, package_fee_rate);
+
+    mine_blocks(&manager.rpc, 1).unwrap();
+    assert_confirmed(&manager, OutPoint::new(split_tx.compute_txid(), 0));
+    assert_confirmed(&manager, OutPoint::new(split_child.compute_txid(), 0));
+}
+
+#[test]
+fn cpfp_expiry_tx_via_anchor() {
+    let manager = SimulationManager::new();
+    let package_fee_rate = FeeRate::from_sat_per_vb_u32(100);
+
+    let bumper_seckey = Scalar::random(&mut rand::rng());
+    let bumper_address = p2tr_address(bumper_seckey.base_point_mul());
+    let funding = take_usable_utxo(&manager.rpc, &bumper_address, Amount::from_sat(100_000));
+    mine_blocks(&manager.rpc, 1).unwrap();
+
+    manager.mine_until_expiry().unwrap();
+    let expiry_tx = manager.contract.expiry_tx().expect("expiry tx");
+    manager
+        .rpc
+        .send_raw_transaction(&expiry_tx)
+        .expect("failed to broadcast expiry TX");
+
+    let child = broadcast_cpfp_child(
+        &manager,
+        &expiry_tx,
+        bumper_seckey,
+        funding,
+        package_fee_rate,
+    );
+    assert_package_fee_rate(&manager, &expiry_tx, package_fee_rate);
+
+    mine_blocks(&manager.rpc, 1).unwrap();
+    assert_confirmed(&manager, OutPoint::new(expiry_tx.compute_txid(), 0));
+    assert_confirmed(&manager, OutPoint::new(child.compute_txid(), 0));
 }

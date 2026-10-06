@@ -13,9 +13,9 @@ use dlctix::musig2::{
 };
 use dlctix::secp::{MaybePoint, Point, Scalar};
 use dlctix::{
-    attestation_locking_point, attestation_secret, hashlock, ContractParameters,
-    ContractSignatures, EventLockingConditions, MarketMaker, Outcome, PayoutWeights, Player,
-    SigningData, TicketedDLC, WinCondition,
+    anchor, attestation_locking_point, attestation_secret, hashlock, AnchorParams,
+    ContractParameters, ContractSignatures, CpfpFundingInput, EventLockingConditions, MarketMaker,
+    Outcome, PayoutWeights, Player, SigningData, TicketedDLC, WinCondition,
 };
 
 use dlctix::bitcoin::hashes::Hash as _;
@@ -38,6 +38,10 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_anchor(None)
+}
+
+fn fixture_with_anchor(anchor: Option<AnchorParams>) -> Fixture {
     let mut rng = rand::rng();
 
     let oracle_seckey = Scalar::random(&mut rng);
@@ -96,6 +100,7 @@ fn fixture() -> Fixture {
         fee_rate: FeeRate::from_sat_per_vb_u32(50),
         funding_value: Amount::from_sat(400_000),
         relative_locktime_block_delta: 72,
+        anchor,
     };
 
     let funding_outpoint = OutPoint {
@@ -341,7 +346,15 @@ fn signing_data_describes_every_signature_and_signer_set() {
 
 #[test]
 fn externally_signed_contract_verifies_and_resolves() {
-    let fx = fixture();
+    verify_and_resolve(fixture());
+}
+
+#[test]
+fn externally_signed_anchored_contract_verifies_and_resolves() {
+    verify_and_resolve(fixture_with_anchor(Some(AnchorParams::default())));
+}
+
+fn verify_and_resolve(fx: Fixture) {
     let params = fx.dlc.params().clone();
     let sd = fx.dlc.signing_data().expect("signing data");
     let signatures = sign_externally(&fx, &sd);
@@ -397,9 +410,69 @@ fn externally_signed_contract_verifies_and_resolves() {
         .signed_split_tx(&bob_win_cond, fx.ticket_preimages[BOB])
         .expect("signed split tx");
     assert_eq!(split_tx.input[0].witness.len(), 4);
-    assert_eq!(split_tx.output.len(), 2);
 
-    assert!(signed.expiry_tx().is_some());
+    let expiry_tx = signed.expiry_tx().expect("expiry tx");
+
+    let Some(anchor_params) = params.anchor else {
+        assert_eq!(outcome_tx.output.len(), 1);
+        assert_eq!(split_tx.output.len(), 2);
+        assert_eq!(expiry_tx.output.len(), 1);
+        assert!(anchor::find_anchor(&outcome_tx).is_none());
+        return;
+    };
+
+    // Every pre-signed transaction ends with the anchor output.
+    for tx in [&outcome_tx, &split_tx, &expiry_tx] {
+        let (anchor_outpoint, anchor_output) = anchor::find_anchor(tx).expect("anchor output");
+        assert_eq!(anchor_outpoint.txid, tx.compute_txid());
+        assert_eq!(anchor_outpoint.vout as usize, tx.output.len() - 1);
+        assert_eq!(anchor_output, &anchor_params.output());
+    }
+    assert_eq!(outcome_tx.output.len(), 2);
+    assert_eq!(split_tx.output.len(), 3);
+    assert_eq!(expiry_tx.output.len(), 2);
+
+    // The outcome output still pays the split TX at index 0.
+    assert_eq!(
+        split_tx.input[0].previous_output,
+        OutPoint::new(outcome_tx.compute_txid(), 0)
+    );
+
+    // The parent fees are known, and a CPFP child can be built for each parent.
+    let outcome_fee = signed.presigned_tx_fee(&outcome_tx).expect("outcome fee");
+    assert_eq!(
+        outcome_fee,
+        params.funding_value - outcome_tx.output.iter().map(|o| o.value).sum::<Amount>()
+    );
+    assert!(signed.presigned_tx_fee(&split_tx).is_some());
+    let funding = CpfpFundingInput {
+        outpoint: OutPoint::new(Txid::from_byte_array([0xCD; 32]), 3),
+        prevout: dlctix::bitcoin::TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: anchor::anchor_script_pubkey(),
+        },
+        weight: dlctix::bitcoin::transaction::InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH,
+    };
+    for parent in [&outcome_tx, &split_tx, &expiry_tx] {
+        let child = signed
+            .cpfp_child_template(
+                parent,
+                &[funding.clone()],
+                anchor::anchor_script_pubkey(),
+                FeeRate::from_sat_per_vb_u32(200),
+            )
+            .expect("cpfp child");
+        assert_eq!(
+            child.input[0].previous_output,
+            anchor::find_anchor(parent).unwrap().0
+        );
+        assert_eq!(child.input[1].previous_output, funding.outpoint);
+    }
+
+    // A transaction from elsewhere is rejected.
+    let mut foreign = outcome_tx.clone();
+    foreign.input[0].previous_output.vout = 7;
+    assert!(signed.presigned_tx_fee(&foreign).is_none());
 }
 
 #[test]

@@ -131,7 +131,7 @@ pub fn find_anchor(tx: &Transaction) -> Option<(OutPoint, &TxOut)> {
 }
 
 /// A confirmed coin which pays for a CPFP child.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CpfpFundingInput {
     /// The coin to spend.
     pub outpoint: OutPoint,

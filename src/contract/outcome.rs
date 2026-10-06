@@ -64,6 +64,7 @@ pub(crate) fn build_outcome_txs(
                 &params.market_maker,
                 outcome_value,
                 params.relative_locktime_block_delta,
+                params.outcome_bound_splits.then_some(outcome),
             )?;
             Ok((outcome, spend_info))
         })

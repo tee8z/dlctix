@@ -110,6 +110,22 @@ pub struct ContractParameters {
     /// re-serialize to the same bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<AnchorParams>,
+
+    /// Commit each outcome in its winners' split-spending scripts.
+    ///
+    /// Without it, an attested outcome transaction depends only on the set of
+    /// winners, so two outcomes paying the same winners different weights (for
+    /// example the same two players ranked in either order) share one outcome
+    /// transaction, and a split transaction signed for one of them can spend the
+    /// other's outcome output. With it, each outcome's output, transaction and
+    /// split sighashes are unique to that outcome.
+    ///
+    /// Defaults to `false`, which builds exactly the transactions of dlctix 0.1.0;
+    /// [`validate`][Self::validate] then refuses outcomes that share winners with
+    /// different weights. The field is omitted from the serialized parameters when
+    /// `false`, so parameters serialized by older versions deserialize unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outcome_bound_splits: bool,
 }
 
 /// Represents one possible outcome branch of the DLC. This includes both
@@ -277,6 +293,25 @@ impl ContractParameters {
         if let Some(anchor) = self.anchor {
             if anchor.value < P2A_DUST_VALUE {
                 return Err(Error::InvalidAnchorValue);
+            }
+        }
+
+        // Unless splits are bound to their outcome, attestation outcomes with the
+        // same winners share one outcome transaction, so each split signed for one
+        // of them also spends the others' outcome output. That is only harmless
+        // when they pay the same weights.
+        if !self.outcome_bound_splits {
+            let mut by_winners = BTreeMap::<Vec<PlayerIndex>, &PayoutWeights>::new();
+            for (outcome, weights) in self.outcome_payouts.iter() {
+                if *outcome == Outcome::Expiry {
+                    continue; // the expiry transaction has its own locktime
+                }
+                let winners: Vec<PlayerIndex> = weights.keys().copied().collect();
+                if let Some(existing) = by_winners.insert(winners, weights) {
+                    if existing != weights {
+                        return Err(Error::UnboundSharedWinners);
+                    }
+                }
             }
         }
 
@@ -622,7 +657,40 @@ mod tests {
             funding_value: Amount::from_sat(100_000),
             relative_locktime_block_delta: 144,
             anchor: None,
+            outcome_bound_splits: false,
         }
+    }
+
+    /// Two places over the same two players, ranked either way.
+    fn reversible_ranking(p: &mut ContractParameters) {
+        p.outcome_payouts = BTreeMap::from([
+            (
+                Outcome::Attestation(0),
+                PayoutWeights::from([(0, 70), (1, 30)]),
+            ),
+            (
+                Outcome::Attestation(1),
+                PayoutWeights::from([(0, 30), (1, 70)]),
+            ),
+            (Outcome::Expiry, PayoutWeights::from([(0, 1), (1, 1)])),
+        ]);
+    }
+
+    #[test]
+    fn rejects_unbound_outcomes_sharing_winners() {
+        let mut p = valid_params();
+        reversible_ranking(&mut p);
+        assert!(matches!(p.validate(), Err(Error::UnboundSharedWinners)));
+        p.outcome_bound_splits = true;
+        p.validate().expect("bound splits make shared winners safe");
+    }
+
+    #[test]
+    fn accepts_unbound_outcomes_sharing_winners_and_weights() {
+        let mut p = valid_params();
+        p.outcome_payouts
+            .insert(Outcome::Attestation(1), PayoutWeights::from([(0, 1)]));
+        p.validate().expect("identical payouts are harmless");
     }
 
     #[test]

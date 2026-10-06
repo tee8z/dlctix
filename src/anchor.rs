@@ -232,8 +232,9 @@ mod tests {
             ANCHOR_OUTPUT_WEIGHT,
             AnchorParams::default().output().weight()
         );
-        // 41 bytes of non-witness data plus the witness item count.
-        assert_eq!(ANCHOR_INPUT_WEIGHT.weight(), Weight::from_wu(41 * 4 + 1));
+        // Only the empty script sig's length byte; `predict_weight` adds the outpoint, the
+        // sequence and the empty witness's item count.
+        assert_eq!(ANCHOR_INPUT_WEIGHT.weight(), Weight::from_wu(4));
     }
 
     fn parent_with_anchor() -> Transaction {

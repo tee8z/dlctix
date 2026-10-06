@@ -23,7 +23,7 @@ const PARAMS_V010_JSON: &str = r#"{"market_maker":{"pubkey":"03d01115d548e7561b1
 
 /// SHA-256 over every outcome and split txid, then every outcome and split
 /// sighash, which dlctix 0.1.0 builds for the fixture, each in map order.
-const PINNED_V010_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const PINNED_V010_DIGEST: &str = "11852c4e334f5b432fd612fe391c03981b4223684698990f9e1187ad49f371ee";
 
 const MARKET_MAKER_SECKEY: u128 = 12;
 const PLAYER_SECKEYS: [u128; 3] = [10, 11, 13];

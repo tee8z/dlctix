@@ -186,7 +186,8 @@ impl ContractParameters {
     ///   ([`UnboundSharedWinners`][Error::UnboundSharedWinners]).
     ///
     /// Deserializing a [`TicketedDLC`][crate::TicketedDLC] or
-    /// [`SignedContract`][crate::SignedContract] runs every check except the last,
+    /// [`SignedContract`][crate::SignedContract], or calling
+    /// [`TicketedDLC::rebuild`][crate::TicketedDLC::rebuild], runs every check except the last,
     /// so contracts signed with dlctix 0.1.0 still load and can be enforced. Call
     /// `validate` yourself on parameters you have not yet agreed to.
     ///

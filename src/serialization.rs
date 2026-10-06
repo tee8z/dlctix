@@ -246,6 +246,7 @@ mod tests {
             funding_value: Amount::from_sat(300_000),
             relative_locktime_block_delta: 25,
             anchor: None,
+            outcome_bound_splits: false,
         };
 
         let json_serialized =
@@ -311,5 +312,15 @@ mod tests {
             .ends_with(r#""relative_locktime_block_delta":25,"anchor":{"value":240}}"#));
         let decoded_anchored: ContractParameters = serde_json::from_str(&json_anchored).unwrap();
         assert_eq!(decoded_anchored, anchored);
+
+        // Bound splits are serialized last, and only when enabled.
+        let bound = ContractParameters {
+            outcome_bound_splits: true,
+            ..anchored
+        };
+        let json_bound = serde_json::to_string(&bound).unwrap();
+        assert!(json_bound.ends_with(r#""anchor":{"value":240},"outcome_bound_splits":true}"#));
+        let decoded_bound: ContractParameters = serde_json::from_str(&json_bound).unwrap();
+        assert_eq!(decoded_bound, bound);
     }
 }

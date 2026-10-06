@@ -174,7 +174,21 @@ impl TicketedDLC {
         funding_outpoint: OutPoint,
     ) -> Result<TicketedDLC, Error> {
         params.validate()?;
+        Self::build(params, funding_outpoint)
+    }
 
+    /// Rebuild a stored contract. This skips the shared-winners rule of
+    /// [`ContractParameters::validate`], so contracts signed with dlctix 0.1.0
+    /// still load.
+    pub(crate) fn rebuild(
+        params: ContractParameters,
+        funding_outpoint: OutPoint,
+    ) -> Result<TicketedDLC, Error> {
+        params.validate_stored()?;
+        Self::build(params, funding_outpoint)
+    }
+
+    fn build(params: ContractParameters, funding_outpoint: OutPoint) -> Result<TicketedDLC, Error> {
         let outcome_tx_build = contract::outcome::build_outcome_txs(&params, funding_outpoint)?;
         let split_tx_build = contract::split::build_split_txs(&params, &outcome_tx_build)?;
 

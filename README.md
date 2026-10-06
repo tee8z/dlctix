@@ -53,7 +53,7 @@ Setting `ContractParameters::anchor` to `Some(AnchorParams { value })` appends a
 
 `anchor::find_anchor` returns the anchor outpoint of a signed transaction, and `SignedContract::cpfp_child_template` builds an unsigned child from the anchor plus your own coins. See the `dlctix::anchor` module documentation for the design trade-offs (why not zero-value TRUC anchors, pinning) and how to sign and broadcast the child.
 
-`anchor` defaults to `None`, which builds exactly the transactions of dlctix 0.1.0, and is omitted from serialized parameters, so contracts serialized by 0.1.0 deserialize, re-serialize and verify unchanged. [`tests/compat.rs`](./tests/compat.rs) checks this against the published 0.1.0 crate.
+`anchor` defaults to `None`, which builds exactly the transactions of dlctix 0.1.0, and is omitted from serialized parameters, so contracts serialized by 0.1.0 deserialize, re-serialize and verify unchanged. [`tests/compat.rs`](./tests/compat.rs) checks this against the published 0.1.0 crate. Loading a stored contract skips the `UnboundSharedWinners` rule, so 0.1.0 contracts that pay the same winners different weights still load; `validate` and `TicketedDLC::new` still refuse new ones.
 
 ## Security considerations
 

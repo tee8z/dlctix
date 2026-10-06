@@ -253,3 +253,36 @@ fn v010_signed_contract_still_verifies_and_resolves() {
         }
     }
 }
+
+/// A 0.1.0 contract whose two attestation outcomes pay the same winners
+/// different weights. 0.2 refuses to build such a contract, but one signed
+/// with 0.1.0 must still load and rebuild identically.
+#[test]
+fn v010_shared_winner_contract_still_loads() {
+    let json = PARAMS_V010_JSON.replace(
+        r#""att0":{"0":1},"att1":{"1":1,"2":2}"#,
+        r#""att0":{"0":7,"1":3},"att1":{"0":3,"1":7}"#,
+    );
+    assert_ne!(json, PARAMS_V010_JSON);
+
+    let old_params: v010::ContractParameters = serde_json::from_str(&json).unwrap();
+    let old = v010::TicketedDLC::new(old_params, funding_outpoint()).unwrap();
+    let stored = serde_json::to_string(&old).unwrap();
+
+    let params: ContractParameters = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        TicketedDLC::new(params, funding_outpoint()),
+        Err(dlctix::Error::UnboundSharedWinners)
+    ));
+
+    let new: TicketedDLC = serde_json::from_str(&stored).expect("0.1.0 TicketedDLC");
+    assert_eq!(serde_json::to_string(&new).unwrap(), stored);
+    assert_eq!(
+        txs_by_name(old.unsigned_outcome_txs()),
+        txs_by_name(new.unsigned_outcome_txs())
+    );
+    assert_eq!(
+        txs_by_name(old.unsigned_split_txs()),
+        txs_by_name(new.unsigned_split_txs())
+    );
+}

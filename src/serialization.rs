@@ -140,7 +140,7 @@ impl Serialize for TicketedDLC {
 impl<'de> Deserialize<'de> for TicketedDLC {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<TicketedDLC, D::Error> {
         let dlc = CompactTicketedDLC::<ContractParameters>::deserialize(deserializer)?;
-        TicketedDLC::new(dlc.params, dlc.funding_outpoint).map_err(|err| {
+        TicketedDLC::rebuild(dlc.params, dlc.funding_outpoint).map_err(|err| {
             D::Error::custom(format!(
                 "failed to build transactions from deserialized ContractParameters: {}",
                 err

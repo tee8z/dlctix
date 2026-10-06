@@ -12,7 +12,7 @@ use musig2::{CompactSignature, KeyAggContext};
 use secp::{Point, Scalar};
 
 use crate::{
-    contract::PlayerIndex,
+    contract::{Outcome, PlayerIndex},
     convert_point,
     errors::Error,
     hashlock::{Preimage, PREIMAGE_SIZE},
@@ -37,6 +37,17 @@ use std::{borrow::Borrow, collections::BTreeMap};
 /// Once PTLCs are available, we can instead sign the split transaction once
 /// and distribute adaptor-signatures to each player, encrypted under the
 /// player's ticket point.
+/// The number a bound winner split leaf commits to: the attestation's
+/// outcome index, or -1 for expiry.
+fn outcome_commitment(outcome: Outcome) -> i64 {
+    match outcome {
+        Outcome::Attestation(index) => {
+            i64::try_from(index).expect("outcome indexes fit in a script number")
+        }
+        Outcome::Expiry => -1,
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct OutcomeSpendInfo {
     untweaked_ctx: KeyAggContext,
@@ -54,6 +65,7 @@ impl OutcomeSpendInfo {
         market_maker: &MarketMaker,
         outcome_value: Amount,
         block_delta: u16,
+        bound_outcome: Option<Outcome>,
     ) -> Result<Self, Error> {
         let winners: BTreeMap<PlayerIndex, &Player> = winner_indexes
             .into_iter()
@@ -78,7 +90,16 @@ impl OutcomeSpendInfo {
                 // the outcome transaction using the split transaction.
                 //
                 // Input: <joint_sig> <preimage>
-                let script = bitcoin::script::Builder::new()
+                let mut builder = bitcoin::script::Builder::new();
+                // Bind the leaf to its outcome: <outcome> OP_DROP. The leaf hash,
+                // and so the outcome output, its transaction and every split
+                // sighash, then differ between outcomes that share winners.
+                if let Some(outcome) = bound_outcome {
+                    builder = builder
+                        .push_int(outcome_commitment(outcome))
+                        .push_opcode(OP_DROP);
+                }
+                let script = builder
                     // Check ticket preimage: OP_SHA256 <ticket_hash> OP_EQUALVERIFY
                     .push_opcode(OP_SHA256)
                     .push_slice(winner.ticket_hash)

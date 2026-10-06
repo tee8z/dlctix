@@ -480,6 +480,16 @@ impl SimulationManager {
     }
 
     fn with_anchor(anchor: Option<AnchorParams>) -> Self {
+        Self::build(anchor, false)
+    }
+
+    /// A two-place contract: outcomes 0 and 1 rank Alice and Bob either way
+    /// (70% / 30%), with splits bound to their outcome.
+    fn ranked() -> Self {
+        Self::build(Some(AnchorParams::default()), true)
+    }
+
+    fn build(anchor: Option<AnchorParams>, ranked: bool) -> Self {
         let mut rng = rand::rng();
 
         // Oracle
@@ -541,21 +551,39 @@ impl SimulationManager {
 
         let initial_block_height = rpc.get_block_count().unwrap();
 
-        let outcome_payouts = BTreeMap::<Outcome, PayoutWeights>::from([
-            (
-                Outcome::Attestation(0),
-                PayoutWeights::from([(alice.index, 1), (bob.index, 2), (carol.index, 1)]),
-            ),
-            (
-                Outcome::Attestation(1),
-                PayoutWeights::from([(bob.index, 3), (carol.index, 1)]),
-            ),
-            (
-                Outcome::Attestation(2),
-                PayoutWeights::from([(alice.index, 1)]),
-            ),
-            (Outcome::Expiry, PayoutWeights::from([(dave.index, 1)])),
-        ]);
+        let outcome_payouts = if ranked {
+            BTreeMap::<Outcome, PayoutWeights>::from([
+                (
+                    Outcome::Attestation(0),
+                    PayoutWeights::from([(alice.index, 70), (bob.index, 30)]),
+                ),
+                (
+                    Outcome::Attestation(1),
+                    PayoutWeights::from([(alice.index, 30), (bob.index, 70)]),
+                ),
+                (
+                    Outcome::Attestation(2),
+                    PayoutWeights::from([(alice.index, 1)]),
+                ),
+                (Outcome::Expiry, PayoutWeights::from([(dave.index, 1)])),
+            ])
+        } else {
+            BTreeMap::<Outcome, PayoutWeights>::from([
+                (
+                    Outcome::Attestation(0),
+                    PayoutWeights::from([(alice.index, 1), (bob.index, 2), (carol.index, 1)]),
+                ),
+                (
+                    Outcome::Attestation(1),
+                    PayoutWeights::from([(bob.index, 3), (carol.index, 1)]),
+                ),
+                (
+                    Outcome::Attestation(2),
+                    PayoutWeights::from([(alice.index, 1)]),
+                ),
+                (Outcome::Expiry, PayoutWeights::from([(dave.index, 1)])),
+            ])
+        };
 
         let contract_params = ContractParameters {
             market_maker,
@@ -569,6 +597,7 @@ impl SimulationManager {
             funding_value: FUNDING_VALUE,
             relative_locktime_block_delta: 25,
             anchor,
+            outcome_bound_splits: ranked,
         };
 
         // Prepare a funding transaction
@@ -678,6 +707,59 @@ fn with_on_chain_resolutions() {
 #[test]
 fn with_on_chain_resolutions_without_anchors() {
     on_chain_resolutions(SimulationManager::with_anchor(None));
+}
+
+/// Outcomes 0 and 1 pay Alice and Bob in opposite order. Once outcome 0 is on
+/// chain, Bob's split for outcome 1 (which pays him 70%) must not spend it.
+#[test]
+fn split_for_another_ranking_cannot_spend_the_outcome() {
+    let manager = SimulationManager::ranked();
+    let attestation = manager.oracle_attestation(0).unwrap();
+    let outcome_tx = manager
+        .contract
+        .signed_outcome_tx(0, attestation)
+        .expect("failed to sign outcome TX");
+    manager
+        .rpc
+        .send_raw_transaction(&outcome_tx)
+        .expect("failed to broadcast outcome TX");
+    manager.mine_delta_blocks().unwrap();
+
+    let reversed = WinCondition {
+        outcome: Outcome::Attestation(1),
+        player_index: manager.bob.index,
+    };
+    let reversed_split = manager
+        .contract
+        .signed_split_tx(&reversed, manager.bob.ticket_preimage)
+        .expect("failed to sign split TX");
+    assert_ne!(
+        reversed_split.input[0].previous_output.txid,
+        outcome_tx.compute_txid(),
+        "the reversed ranking's split must not spend this outcome TX"
+    );
+    let err = manager
+        .rpc
+        .send_raw_transaction(&reversed_split)
+        .expect_err("a split for another ranking must not spend the outcome TX");
+    assert!(
+        err.to_string().contains("missingorspent"),
+        "expected a missing-input rejection, got: {err}"
+    );
+
+    // The split for the attested ranking still works.
+    let attested = WinCondition {
+        outcome: Outcome::Attestation(0),
+        player_index: manager.bob.index,
+    };
+    let split_tx = manager
+        .contract
+        .signed_split_tx(&attested, manager.bob.ticket_preimage)
+        .expect("failed to sign split TX");
+    manager
+        .rpc
+        .send_raw_transaction(&split_tx)
+        .expect("failed to broadcast the attested split TX");
 }
 
 fn on_chain_resolutions(manager: SimulationManager) {
@@ -1393,6 +1475,7 @@ fn stress_test() {
         funding_value: FUNDING_VALUE,
         relative_locktime_block_delta: 25,
         anchor: Some(AnchorParams::default()),
+        outcome_bound_splits: true,
     };
 
     let funding_outpoint = OutPoint {

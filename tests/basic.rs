@@ -160,6 +160,11 @@ fn two_player_example() -> Result<(), Box<dyn std::error::Error>> {
         // which lets anyone fee-bump them with CPFP. `None` builds the same
         // transactions as dlctix 0.1.0.
         anchor: Some(dlctix::AnchorParams::default()),
+
+        // Commit each outcome in its winners' split scripts, so outcomes that
+        // pay the same winners different weights never share a transaction.
+        // `false` builds the same transactions as dlctix 0.1.0.
+        outcome_bound_splits: true,
     };
 
     // Usually the market maker would construct the ContractParameters, and would send it

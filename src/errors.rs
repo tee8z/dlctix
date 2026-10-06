@@ -52,6 +52,10 @@ pub enum Error {
     EmptyOutcomePayouts,
     /// A payout map contains no winners.
     EmptyPayoutMap,
+    /// The anchor output value is below the P2A dust limit.
+    InvalidAnchorValue,
+    /// A transaction has no anchor output to fee-bump.
+    MissingAnchor,
 
     // Transaction signing errors
     /// A signature, attestation, or set of signature maps is invalid.
@@ -137,6 +141,8 @@ impl fmt::Display for Error {
             InvalidExpiry => write!(f, "event expiry is zero or immediately spendable"),
             EmptyOutcomePayouts => write!(f, "contract has no outcomes"),
             EmptyPayoutMap => write!(f, "empty payout map"),
+            InvalidAnchorValue => write!(f, "anchor value is below the P2A dust limit"),
+            MissingAnchor => write!(f, "transaction has no anchor output"),
 
             InvalidSignature => write!(f, "invalid signature"),
             MissingSignature(msg) => write!(f, "missing required signature: {}", msg),

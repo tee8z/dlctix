@@ -84,11 +84,16 @@ pub(crate) fn build_outcome_txs(
                 Outcome::Attestation(_) => LockTime::ZERO, // Normal outcome transaction
             };
 
+            // The anchor, if any, is always the last output.
+            let output = std::iter::once(outcome_output)
+                .chain(params.anchor_output())
+                .collect();
+
             let outcome_tx = Transaction {
                 version: bitcoin::transaction::Version::TWO,
                 lock_time,
                 input: vec![funding_input.clone()],
-                output: vec![outcome_output],
+                output,
             };
 
             Ok((outcome, outcome_tx))

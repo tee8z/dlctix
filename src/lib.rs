@@ -37,14 +37,17 @@
 //!   call [`TicketedDLC::verify_signatures`] or [`TicketedDLC::into_signed_contract`].
 //!   The funding output is an n-of-n key with no timeout, so a contract funded with
 //!   an invalid signature set can only be recovered with every player's cooperation.
-//! - **Fixed fees, no fee bumping.** Every pre-signed transaction carries the fixed
-//!   [`fee_rate`][ContractParameters::fee_rate] and has no anchor output. No party can
-//!   fee-bump an outcome or split transaction unilaterally. The split transaction
-//!   spending path has no relative locktime of its own, so it can confirm as early
-//!   as the same block as the outcome transaction, but it must confirm before the
-//!   market maker's reclaim path matures `2 * delta` blocks after the outcome
-//!   transaction, or the market maker can reclaim the funds. Choose a conservative fee
-//!   rate and [`relative_locktime_block_delta`][ContractParameters::relative_locktime_block_delta],
+//! - **Fees and fee bumping.** Every pre-signed transaction carries the fixed
+//!   [`fee_rate`][ContractParameters::fee_rate]. Without an
+//!   [`anchor`][ContractParameters::anchor] no party can fee-bump an outcome or split
+//!   transaction unilaterally. The split transaction's input carries a BIP-68
+//!   relative locktime of `delta` blocks, so it can confirm `delta` blocks after the
+//!   outcome transaction at the earliest, and it must confirm before the market
+//!   maker's reclaim path matures `2 * delta` blocks after the outcome transaction,
+//!   or the market maker can reclaim the funds. Enable anchors so that anyone can
+//!   CPFP a stuck transaction (see the [`anchor`] module); without them, choose a
+//!   conservative fee rate and
+//!   [`relative_locktime_block_delta`][ContractParameters::relative_locktime_block_delta],
 //!   and consider signing several contracts at different fee rates.
 //! - **Expiry.** With [`expiry: None`][EventLockingConditions::expiry] there is no
 //!   expiry transaction. If the oracle never attests, the market maker's capital
@@ -85,6 +88,7 @@ pub(crate) mod parties;
 pub(crate) mod serialization;
 pub(crate) mod spend_info;
 
+pub mod anchor;
 pub mod hashlock;
 pub mod signing;
 
@@ -92,6 +96,7 @@ pub use bitcoin;
 pub use musig2;
 pub use secp;
 
+pub use anchor::{AnchorParams, CpfpFundingInput};
 use contract::{
     outcome::{OutcomeSignatures, OutcomeTransactionBuildOutput},
     split::SplitTransactionBuildOutput,
@@ -102,7 +107,8 @@ use hashlock::{sha256, Preimage};
 use bitcoin::hashes::Hash as _;
 use bitcoin::{
     secp256k1::XOnlyPublicKey as BitcoinXOnly, sighash::Prevouts,
-    transaction::InputWeightPrediction, OutPoint, Transaction, TxIn, TxOut,
+    transaction::InputWeightPrediction, Amount, FeeRate, OutPoint, ScriptBuf, Transaction, TxIn,
+    TxOut,
 };
 use musig2::{
     secp256k1::XOnlyPublicKey as Musig2XOnly, AdaptorSignature, AggNonce, CompactSignature,
@@ -994,6 +1000,61 @@ impl SignedContract {
         split_tx.input[0].witness = witness;
 
         Ok(split_tx)
+    }
+
+    /// Returns the fee paid by an outcome, expiry, or split transaction of this
+    /// contract, signed or unsigned. Returns `None` if `tx` does not spend the
+    /// funding outpoint or an outcome transaction output of this contract.
+    pub fn presigned_tx_fee(&self, tx: &Transaction) -> Option<Amount> {
+        let [input] = tx.input.as_slice() else {
+            return None;
+        };
+        let input_value = if input.previous_output == self.dlc.funding_outpoint {
+            self.dlc.params.funding_value
+        } else {
+            self.dlc
+                .outcome_tx_build
+                .outcome_txs()
+                .values()
+                .find(|outcome_tx| {
+                    input.previous_output == OutPoint::new(outcome_tx.compute_txid(), 0)
+                })?
+                .output
+                .first()?
+                .value
+        };
+        let output_value = tx
+            .output
+            .iter()
+            .try_fold(Amount::ZERO, |acc, output| acc.checked_add(output.value))?;
+        input_value.checked_sub(output_value)
+    }
+
+    /// Build an unsigned CPFP child spending the anchor of a fully signed outcome,
+    /// expiry, or split transaction of this contract. See
+    /// [`anchor::cpfp_child_template`] for the layout of the child and the
+    /// [`anchor`] module for how to sign and broadcast it.
+    ///
+    /// Returns [`Error::MissingAnchor`] if the contract was built without
+    /// anchors, and [`Error::InvalidInput`] if `parent` is not a transaction of
+    /// this contract.
+    pub fn cpfp_child_template(
+        &self,
+        parent: &Transaction,
+        funding_inputs: &[CpfpFundingInput],
+        change_script_pubkey: ScriptBuf,
+        package_fee_rate: FeeRate,
+    ) -> Result<Transaction, Error> {
+        let parent_fee = self.presigned_tx_fee(parent).ok_or(Error::InvalidInput(
+            "parent is not a transaction of this contract",
+        ))?;
+        anchor::cpfp_child_template(
+            parent,
+            parent_fee,
+            funding_inputs,
+            change_script_pubkey,
+            package_fee_rate,
+        )
     }
 
     /// Returns prevout information for the market maker to create and sign a

@@ -101,6 +101,7 @@ fn fixture_with_anchor(anchor: Option<AnchorParams>) -> Fixture {
         funding_value: Amount::from_sat(400_000),
         relative_locktime_block_delta: 72,
         anchor,
+        outcome_bound_splits: false,
     };
 
     let funding_outpoint = OutPoint {

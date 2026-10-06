@@ -56,6 +56,9 @@ pub enum Error {
     InvalidAnchorValue,
     /// A transaction has no anchor output to fee-bump.
     MissingAnchor,
+    /// Two attestation outcomes pay the same set of winners different weights,
+    /// but the contract does not bind split transactions to their outcome.
+    UnboundSharedWinners,
 
     // Transaction signing errors
     /// A signature, attestation, or set of signature maps is invalid.
@@ -143,6 +146,10 @@ impl fmt::Display for Error {
             EmptyPayoutMap => write!(f, "empty payout map"),
             InvalidAnchorValue => write!(f, "anchor value is below the P2A dust limit"),
             MissingAnchor => write!(f, "transaction has no anchor output"),
+            UnboundSharedWinners => write!(
+                f,
+                "outcomes share winners with different payouts; enable outcome_bound_splits"
+            ),
 
             InvalidSignature => write!(f, "invalid signature"),
             MissingSignature(msg) => write!(f, "missing required signature: {}", msg),
